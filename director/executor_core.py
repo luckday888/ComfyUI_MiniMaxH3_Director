@@ -830,7 +830,8 @@ def execute_director_plan_core(
                 f"from seg #{seg.index} "
                 f"({'AV latent' if prev_av is not None else 'pixels'}"
                 f"{', +audio' if pin_audio else ', video-only'}); "
-                f"sample={sample_len}f → export {num_frames}f"
+                f"sample={sample_len}f → export {sample_len - trim_frames}f "
+                f"(UI {num_frames}f, kept full tail)"
                 + (
                     f"; trimmed prev export -{trimmed_prev_export}f (phase pin)"
                     if trimmed_prev_export
@@ -943,7 +944,13 @@ def execute_director_plan_core(
         if first_pass_gpu is not None and upscale_frames is None:
             del first_pass_gpu
             first_pass_gpu = None
-        export_len = int(num_frames) if trim_frames > 0 else int(target_len)
+        # 段间引导：sample 比 UI 段长多出「ctx 锁定头 + 网格余量」。解码裁掉 ctx
+        # 头后，保留模型实际生成的整段自由区（sample-trim），不再砍回 num_frames——
+        # 否则自由区尾部约 0.5s（句尾 2-3 字 / 收音）会被硬裁，且下一段 pin 的相位
+        # 对齐还会再裁上一段尾部。非连续段（trim=0）仍按 UI 段长 target_len 导出。
+        export_len = (
+            int(sample_len) - int(trim_frames) if trim_frames > 0 else int(target_len)
+        )
         if will_refine and not skip_first_sample:
             save_first_pass_cache(
                 node_id,
@@ -1048,10 +1055,14 @@ def execute_director_plan_core(
         decoded, audio_dict = _decode_av_latent(
             samples, vae, audio_vae, decode_audio=decode_audio,
         )
-        # Keep exactly the UI segment length. With motion context, sample is
-        # longer (visible+ctx, 17k+5 aligned); after trim, crop to num_frames.
-        # Next segment must pin at export end (trim+export), not sample end.
-        export_len = int(num_frames) if trim_frames > 0 else int(target_len)
+        # Keep the full model-generated free region after the ctx head trim
+        # (sample-trim) for motion-context segments — cropping back to num_frames
+        # dropped the ~0.5s sentence tail and made the next pin trim this segment.
+        # Non-continuity segments (trim=0) still crop to the UI length target_len.
+        # Next segment pins at export end (trim+export == sample end → grid-aligned).
+        export_len = (
+            int(sample_len) - int(trim_frames) if trim_frames > 0 else int(target_len)
+        )
         decoded, audio_dict = _trim_decoded_to_export(
             decoded,
             audio_dict,

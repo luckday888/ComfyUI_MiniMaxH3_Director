@@ -329,7 +329,13 @@ def _layout_image_batches(
         images_out = segment_outputs
         frame_count = sum(int(s.shape[0]) for s in segment_outputs)
         return images_out, frame_count
-    combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
+    # 段间引导：中间段保留模型实际生成的自由区（比 UI 段长多出网格余量），合并片
+    # 天然长于 plan.total_frames。此处不能再砍回 UI 总时长，否则结尾收音被裁、且与
+    # 按实际段长拼接的音频错位。非连续模式维持原行为（裁到 UI 总时长）。
+    if getattr(plan, "continuity_enabled", False):
+        combined = combined.cpu().float()
+    else:
+        combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
     return [combined], int(combined.shape[0])
 
 
