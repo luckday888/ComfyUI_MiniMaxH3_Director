@@ -75,6 +75,7 @@ from .segment_mp4_export import (
     new_segment_mp4_run_dir,
 )
 from .segment_continuity import (
+    anchor_free_region_exposure,
     concat_continuous_chunks,
     is_continuity_active,
     resolve_prev_segment_output,
@@ -1055,6 +1056,20 @@ def execute_director_plan_core(
         decoded, audio_dict = _decode_av_latent(
             samples, vae, audio_vae, decode_audio=decode_audio,
         )
+        # 段间引导「曝光锚定」：自由区逐段变亮的反馈校正。把 pin 头之后的自由
+        # 区 per-channel 均值拉回上一段收尾曝光（以上一段校正后导出帧为锚点），
+        # 只调全局曝光、不混合像素。pin 头保持原样，随后随 trim 丢弃。
+        if (
+            getattr(plan, "exposure_anchor_enabled", True)
+            and use_motion_context
+            and trim_frames > 0
+        ):
+            decoded = anchor_free_region_exposure(
+                decoded,
+                trim_frames=trim_frames,
+                anchor_frames=prev_tail,
+                seg_index=seg.index,
+            )
         # Keep the full model-generated free region after the ctx head trim
         # (sample-trim) for motion-context segments — cropping back to num_frames
         # dropped the ~0.5s sentence tail and made the next pin trim this segment.

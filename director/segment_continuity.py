@@ -106,6 +106,14 @@ CONTINUITY_SPIKE_LAND_WEIGHT = 0.0
 CONTINUITY_SPIKE_SCAN = 5
 CONTINUITY_HOLD_POP_ON_TAIL = False
 
+# 段间引导配套：自由区曝光锚定（防后段逐段变亮）。
+# 对 pin 头之后的自由区统一施加 per-channel 标量增益，把均值曝光拉回上段收尾
+# 水平；只调全局曝光、不混合像素，故不花屏/幻影。增益限幅 ±8%，避免误伤合法
+# 的剧情光线变化。锚点优先用上一段「校正后导出帧」末尾，沿像素链传递不漂移。
+CONTINUITY_EXPOSURE_ANCHOR_MAX_RATIO = 1.08
+CONTINUITY_EXPOSURE_ANCHOR_FRAMES = 4
+CONTINUITY_EXPOSURE_ANCHOR_EPSILON = 0.01
+
 
 def _truthy_continuity_flag(value) -> bool:
     """Accept bool/int/common string forms from UI or reloaded workflows."""
@@ -132,6 +140,20 @@ def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[
         or DEFAULT_CONTINUITY_OVERLAP
     )
     return True, snap_context_frames(raw)
+
+
+def resolve_exposure_anchor_enabled(timeline: dict) -> bool:
+    """段间引导配套开关「曝光锚定」：自由区曝光拉回上段收尾，防逐段变亮。
+
+    仅在段间引导实际 pin（trim>0、非首段）时生效；字段缺失默认开启，
+    用户可在输出面板显式关闭。
+    """
+    output = (timeline or {}).get("output") or {}
+    if "exposureAnchorEnabled" in output:
+        return _truthy_continuity_flag(output.get("exposureAnchorEnabled"))
+    if "exposure_anchor_enabled" in output:
+        return _truthy_continuity_flag(output.get("exposure_anchor_enabled"))
+    return True
 
 
 def resolve_segment_continuity_from_prev(
@@ -344,6 +366,67 @@ def _tensor_mean_luminance(frames: torch.Tensor) -> float:
         f = f.unsqueeze(0)
     luma = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
     return float(luma.mean().item())
+
+
+def _channel_mean_rgb(frames: torch.Tensor) -> torch.Tensor:
+    """Per-channel mean over [F,H,W,C] (or [H,W,C]) → [3] on the frames' device."""
+    f = frames.float()
+    if f.dim() == 3:
+        f = f.unsqueeze(0)
+    return f[..., :3].mean(dim=(0, 1, 2)).clamp_min(1e-6)
+
+
+def anchor_free_region_exposure(
+    decoded: torch.Tensor,
+    *,
+    trim_frames: int,
+    anchor_frames: torch.Tensor | None = None,
+    seg_index: int = 0,
+) -> torch.Tensor:
+    """曝光锚定：把 pin 头之后的自由区 per-channel 均值拉回上段收尾曝光。
+
+    段间引导下每段输出全是模型自由生成帧，曝光相对固定锚点有一个方向一致
+    （偏亮）的小偏移，且下段锚点取自上段自由输出，偏移逐段累加 → 后段系统
+    性变亮。这里对自由区统一施加 per-channel 标量增益（限幅 ±8%），只调全局
+    曝光、不混合像素、不改空间细节，因此不会花屏/幻影。
+
+    锚点优先用 ``anchor_frames``（上一段校正后导出帧末尾，沿像素链传递、不
+    漂移）；缺失时回退本段 pin 头最后几帧。pin 头本身保持不动（随后会被 trim
+    丢弃）。
+    """
+    if decoded is None or int(trim_frames) <= 0:
+        return decoded
+    trim = int(trim_frames)
+    if int(decoded.shape[0]) <= trim + 1:
+        return decoded
+
+    anchor = None
+    if anchor_frames is not None and int(anchor_frames.shape[0]) > 0:
+        k = min(CONTINUITY_EXPOSURE_ANCHOR_FRAMES, int(anchor_frames.shape[0]))
+        anchor = _channel_mean_rgb(anchor_frames[-k:])
+    if anchor is None:
+        k = min(CONTINUITY_EXPOSURE_ANCHOR_FRAMES, trim)
+        anchor = _channel_mean_rgb(decoded[trim - k:trim])
+
+    free = decoded[trim:]
+    free_mean = _channel_mean_rgb(free)
+    anchor = anchor.to(device=free_mean.device, dtype=free_mean.dtype)
+    lo = 1.0 / CONTINUITY_EXPOSURE_ANCHOR_MAX_RATIO
+    gain = (anchor / free_mean).clamp(lo, CONTINUITY_EXPOSURE_ANCHOR_MAX_RATIO)
+    if float((gain - 1.0).abs().max().item()) < CONTINUITY_EXPOSURE_ANCHOR_EPSILON:
+        return decoded
+
+    out = decoded.clone()
+    region = out[trim:]
+    out[trim:] = (region.float() * gain).clamp(0.0, 1.0).to(dtype=decoded.dtype)
+    log.info(
+        "Segment continuity: 曝光锚定 seg#%d 自由区 per-channel gain (%.3f, %.3f, %.3f)",
+        int(seg_index) + 1,
+        float(gain[0]),
+        float(gain[1]),
+        float(gain[2]),
+    )
+    return out
 
 
 def normalize_guide_luma_to_source(

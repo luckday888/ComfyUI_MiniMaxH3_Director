@@ -154,6 +154,19 @@ function isContinuityEnabled(output) {
     return false;
 }
 
+/** 曝光锚定（段间引导配套）：默认开启，仅显式关闭时为 false。 */
+function isExposureAnchorEnabled(output) {
+    if (!output) return true;
+    const raw = output.exposureAnchorEnabled ?? output.exposure_anchor_enabled;
+    if (raw == null) return true;
+    if (raw === false || raw === 0) return false;
+    if (typeof raw === "string") {
+        const s = raw.trim().toLowerCase();
+        return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }
+    return true;
+}
+
 /** Whether段间引导 controls apply for the current task + segment count. */
 function isContinuityEligible(editor) {
     if (!editor) return false;
@@ -204,6 +217,7 @@ function normalizeOutputContinuity(output = {}) {
         ...output,
         continuityEnabled: isContinuityEnabled(output),
         continuityOverlapFrames: snapContinuityFrames(rawOverlap),
+        exposureAnchorEnabled: isExposureAnchorEnabled(output),
         audioMode: normalizeAudioMode(output.audioMode ?? output.audio_mode),
         refImageSize: normalizeRefImageSize(output.refImageSize ?? output.ref_image_size),
     };
@@ -1861,6 +1875,7 @@ function parseTimeline(raw, totalFrames, fps) {
             refImageSize: normalizeRefImageSize(data.output?.refImageSize ?? data.output?.ref_image_size),
             continuityEnabled: data.output?.continuityEnabled ?? data.output?.continuity_enabled,
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
+            exposureAnchorEnabled: data.output?.exposureAnchorEnabled ?? data.output?.exposure_anchor_enabled,
         });
         // Infer aspectRatio from saved width/height when older payloads omitted the label.
         if (!data.output.aspectRatio && data.output.width > 0 && data.output.height > 0) {
@@ -2795,6 +2810,7 @@ class MiniMaxH3DirectorEditor {
                     <option value="39">39</option>
                     <option value="56">56</option>
                 </select>
+                <label data-i18n-title="tooltip.exposureAnchor" style="margin-left:6px;white-space:nowrap"><input type="checkbox" data-r="exposure-anchor-cb" checked><span data-i18n="output.exposureAnchor">曝光锚定</span></label>
             </span>
             <button type="button" class="bd-btn bd-btn-live-preview" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
@@ -3100,6 +3116,7 @@ class MiniMaxH3DirectorEditor {
         this.segmentContinuityWrap = this.root.querySelector('[data-r="segment-continuity-wrap"]');
         this.segmentContinuityCb = this.root.querySelector('[data-r="segment-continuity-cb"]');
         this.segmentContinuityOverlap = this.root.querySelector('[data-r="segment-continuity-overlap"]');
+        this.exposureAnchorCb = this.root.querySelector('[data-r="exposure-anchor-cb"]');
         this.outPreview = this.root.querySelector('[data-r="out-preview"]');
         this.runStatusEl = this.root.querySelector('[data-r="run-status"]');
         this.runTitleEl = this.root.querySelector('[data-r="run-title"]');
@@ -3395,6 +3412,12 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityOverlap.oninput = applyOverlap;
             this.segmentContinuityOverlap.addEventListener("keydown", (e) => e.stopPropagation());
             this.segmentContinuityOverlap.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.exposureAnchorCb) {
+            this.exposureAnchorCb.onchange = () => {
+                this.onOutputField("exposureAnchorEnabled", this.exposureAnchorCb.checked);
+                this.updateSegmentContinuityUI();
+            };
         }
         if (this.segContinuityFromPrevCb) {
             this.segContinuityFromPrevCb.onchange = () => {
@@ -5877,6 +5900,7 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            exposureAnchorEnabled: true,
         };
         // Prefer ResolutionSelector fields; backfill from width/height when missing.
         // Custom keeps explicit width/height and does not recompute from megapixels.
@@ -5921,6 +5945,7 @@ class MiniMaxH3DirectorEditor {
             }
         }
         if (this.segmentContinuityCb) this.segmentContinuityCb.checked = isContinuityEnabled(out);
+        if (this.exposureAnchorCb) this.exposureAnchorCb.checked = isExposureAnchorEnabled(out);
         if (this.segmentContinuityOverlap) {
             this.segmentContinuityOverlap.value = String(
                 snapContinuityFrames(out.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES),
@@ -5969,6 +5994,9 @@ class MiniMaxH3DirectorEditor {
         if (this.segmentContinuityCb && this.timeline?.output) {
             // Keep DOM aligned with timeline; eligibility only gates visibility.
             this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
+        }
+        if (this.exposureAnchorCb && this.timeline?.output) {
+            this.exposureAnchorCb.checked = isExposureAnchorEnabled(this.timeline.output);
         }
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
@@ -6191,6 +6219,7 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            exposureAnchorEnabled: true,
         };
         if (key === "aspectRatio") {
             if (isCustomAspectRatio(value)) {
@@ -6243,6 +6272,8 @@ class MiniMaxH3DirectorEditor {
             this.timeline.output.continuityEnabled = !!value;
         } else if (key === "continuityOverlapFrames") {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(value);
+        } else if (key === "exposureAnchorEnabled") {
+            this.timeline.output.exposureAnchorEnabled = !!value;
         }
         this.syncOutputUIFromTimeline();
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
@@ -6353,6 +6384,7 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            exposureAnchorEnabled: true,
         };
         if (this.timeline.output.audioMode == null) {
             this.timeline.output.audioMode = "generate";
@@ -6373,6 +6405,12 @@ class MiniMaxH3DirectorEditor {
         } else {
             // Normalize stored flag without clearing preference while ineligible.
             this.timeline.output.continuityEnabled = isContinuityEnabled(this.timeline.output);
+        }
+        // 曝光锚定：可从 DOM 勾选；不可见/不适用时保留偏好（缺失默认开启）。
+        if (continuityEligible && this.exposureAnchorCb) {
+            this.timeline.output.exposureAnchorEnabled = !!this.exposureAnchorCb.checked;
+        } else if (this.timeline.output.exposureAnchorEnabled == null) {
+            this.timeline.output.exposureAnchorEnabled = true;
         }
         if (continuityEligible && this.segmentContinuityOverlap) {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
