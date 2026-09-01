@@ -602,17 +602,11 @@ def build_plan_from_external_groups(
     raw["totalFrames"] = total
     raw["editMode"] = "segment"
 
-    from .segment_continuity import (
-        resolve_continuity_settings,
-        resolve_exposure_anchor_enabled,
-        resolve_exposure_anchor_strength,
-    )
+    from .segment_continuity import resolve_continuity_settings
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
-    exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
-    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
 
     return DirectorPlan(
         frame_rate=fps,
@@ -635,6 +629,4 @@ def build_plan_from_external_groups(
         run_indices=run_indices,
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
-        exposure_anchor_enabled=exposure_anchor_enabled,
-        exposure_anchor_strength=exposure_anchor_strength,
     )

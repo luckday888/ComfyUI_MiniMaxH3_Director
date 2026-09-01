@@ -221,10 +221,6 @@ class DirectorPlan:
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
-    # 段间引导配套：自由区曝光锚定（防后段逐段变亮）。仅在 pin 生效时起作用。
-    exposure_anchor_enabled: bool = True
-    # 曝光锚定校正强度（相对限幅，0.08 = ±8%）；0 = 不校正。
-    exposure_anchor_strength: float = 0.08
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
     refine: dict | None = None
     # Sampling knobs stamped at execute time (first-pass cache fingerprint).
@@ -784,16 +780,12 @@ def build_director_plan(
 
     from .segment_continuity import (
         resolve_continuity_settings,
-        resolve_exposure_anchor_enabled,
-        resolve_exposure_anchor_strength,
         resolve_segment_continuity_from_prev,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
-    exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
-    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     for seg, (_start, _end, seg_data) in zip(segments, segment_ranges):
         seg.continuity_from_prev = resolve_segment_continuity_from_prev(
             seg_data if isinstance(seg_data, dict) else {},
@@ -827,8 +819,6 @@ def build_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
-        exposure_anchor_enabled=exposure_anchor_enabled,
-        exposure_anchor_strength=exposure_anchor_strength,
         global_ref_audios=global_ref_audios,
     )
 

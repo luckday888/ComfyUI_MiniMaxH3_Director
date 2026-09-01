@@ -106,16 +106,6 @@ CONTINUITY_SPIKE_LAND_WEIGHT = 0.0
 CONTINUITY_SPIKE_SCAN = 5
 CONTINUITY_HOLD_POP_ON_TAIL = False
 
-# 段间引导配套：自由区曝光锚定（防后段逐段变亮）。
-# 对 pin 头之后的自由区统一施加 per-channel 标量增益，把均值曝光拉回本段
-# pin 头末尾水平；只调全局曝光、不混合像素，故不花屏/幻影。强度为相对限幅
-# （默认 ±8%），UI 滑块可调 0–20%；锚点取本段 pin 头（不跨段复合放大）。
-CONTINUITY_EXPOSURE_ANCHOR_MAX_RATIO = 1.08
-CONTINUITY_EXPOSURE_ANCHOR_DEFAULT_STRENGTH = 0.08
-CONTINUITY_EXPOSURE_ANCHOR_MAX_STRENGTH = 0.20
-CONTINUITY_EXPOSURE_ANCHOR_FRAMES = 4
-CONTINUITY_EXPOSURE_ANCHOR_EPSILON = 0.01
-
 
 def _truthy_continuity_flag(value) -> bool:
     """Accept bool/int/common string forms from UI or reloaded workflows."""
@@ -142,41 +132,6 @@ def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[
         or DEFAULT_CONTINUITY_OVERLAP
     )
     return True, snap_context_frames(raw)
-
-
-def resolve_exposure_anchor_enabled(timeline: dict) -> bool:
-    """段间引导配套开关「曝光锚定」：自由区曝光拉回上段收尾，防逐段变亮。
-
-    仅在段间引导实际 pin（trim>0、非首段）时生效；字段缺失默认开启，
-    用户可在输出面板显式关闭。
-    """
-    output = (timeline or {}).get("output") or {}
-    if "exposureAnchorEnabled" in output:
-        return _truthy_continuity_flag(output.get("exposureAnchorEnabled"))
-    if "exposure_anchor_enabled" in output:
-        return _truthy_continuity_flag(output.get("exposure_anchor_enabled"))
-    return True
-
-
-def resolve_exposure_anchor_strength(timeline: dict) -> float:
-    """曝光锚定校正强度（相对限幅），UI 滑块以百分比 0–20 传入。
-
-    返回小数（0.08 = ±8%）；0 表示不做校正。缺失/非法用默认 8%。
-    """
-    output = (timeline or {}).get("output") or {}
-    raw = output.get("exposureAnchorStrength", output.get("exposure_anchor_strength"))
-    if raw is None:
-        return CONTINUITY_EXPOSURE_ANCHOR_DEFAULT_STRENGTH
-    try:
-        pct = float(raw)
-    except (TypeError, ValueError):
-        return CONTINUITY_EXPOSURE_ANCHOR_DEFAULT_STRENGTH
-    # 兼容历史/外部直接传小数（0.08）与 UI 百分比（8）。
-    if 0.0 < pct < 1.0:
-        strength = pct
-    else:
-        strength = pct / 100.0
-    return max(0.0, min(CONTINUITY_EXPOSURE_ANCHOR_MAX_STRENGTH, strength))
 
 
 def resolve_segment_continuity_from_prev(
@@ -389,70 +344,6 @@ def _tensor_mean_luminance(frames: torch.Tensor) -> float:
         f = f.unsqueeze(0)
     luma = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
     return float(luma.mean().item())
-
-
-def _channel_mean_rgb(frames: torch.Tensor) -> torch.Tensor:
-    """Per-channel mean over [F,H,W,C] (or [H,W,C]) → [3] on the frames' device."""
-    f = frames.float()
-    if f.dim() == 3:
-        f = f.unsqueeze(0)
-    return f[..., :3].mean(dim=(0, 1, 2)).clamp_min(1e-6)
-
-
-def anchor_free_region_exposure(
-    decoded: torch.Tensor,
-    *,
-    trim_frames: int,
-    seg_index: int = 0,
-    strength: float | None = None,
-) -> torch.Tensor:
-    """曝光锚定：把 pin 头之后自由区的 per-channel 均值拉回「本段 pin 头末尾」。
-
-    段间引导下每段成片全是模型自由生成帧，自由区从 pin 起点向模型偏好曝光
-    漂移（常见为逐帧变亮），段段相接即观感上后段越来越亮。
-
-    锚点**只取本段 pin 头的最后几帧**（``decoded[trim-k:trim]``）：它是上段
-    latent 直传解码出的真实衔接帧，**永不被本函数改写**，因此校正不会跨段
-    复合放大（早先取「上段校正后像素」作锚会形成正反馈，符号一旦判反就逐段
-    累乘提亮）。对自由区统一施加 per-channel 标量增益，只调全局曝光、不混合
-    像素、不改空间细节，故不花屏/幻影。pin 头本身保持不动（随后随 trim 丢弃）。
-
-    ``strength`` 为相对限幅（0.08 = 增益限制在 ±8%）；0 表示不校正。
-    """
-    if decoded is None or int(trim_frames) <= 0:
-        return decoded
-    if strength is None:
-        strength = CONTINUITY_EXPOSURE_ANCHOR_DEFAULT_STRENGTH
-    if float(strength) <= 0.0:
-        return decoded
-    max_ratio = 1.0 + float(strength)
-    trim = int(trim_frames)
-    if int(decoded.shape[0]) <= trim + 1:
-        return decoded
-
-    k = min(CONTINUITY_EXPOSURE_ANCHOR_FRAMES, trim)
-    anchor = _channel_mean_rgb(decoded[trim - k:trim])
-    free = decoded[trim:]
-    free_mean = _channel_mean_rgb(free)
-    anchor = anchor.to(device=free_mean.device, dtype=free_mean.dtype)
-    lo = 1.0 / max_ratio
-    gain = (anchor / free_mean).clamp(lo, max_ratio)
-    if float((gain - 1.0).abs().max().item()) < CONTINUITY_EXPOSURE_ANCHOR_EPSILON:
-        return decoded
-
-    out = decoded.clone()
-    region = out[trim:]
-    out[trim:] = (region.float() * gain).clamp(0.0, 1.0).to(dtype=decoded.dtype)
-    log.info(
-        "Segment continuity: 曝光锚定 seg#%d 强度±%.0f%% pin头均值(%.3f,%.3f,%.3f) "
-        "自由区均值(%.3f,%.3f,%.3f) → gain(%.3f,%.3f,%.3f)",
-        int(seg_index) + 1,
-        float(strength) * 100.0,
-        float(anchor[0]), float(anchor[1]), float(anchor[2]),
-        float(free_mean[0]), float(free_mean[1]), float(free_mean[2]),
-        float(gain[0]), float(gain[1]), float(gain[2]),
-    )
-    return out
 
 
 def normalize_guide_luma_to_source(
