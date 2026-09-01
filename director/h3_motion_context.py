@@ -307,6 +307,7 @@ def apply_motion_context(
     keep_existing_keyframes: bool = True,
     context_end_frame: int | None = None,
     audio_context_length: int | None = None,
+    video_from_frames: bool = False,
 ) -> tuple[Any, int, int]:
     """Inject previous-segment motion (and optional audio) into conditioning.
 
@@ -323,6 +324,14 @@ def apply_motion_context(
     caches.
 
     ``audio_context_length``: official example uses 24 with video context 22.
+
+    ``video_from_frames``: force the *video* pin to re-encode
+    ``context_frames`` (the previous segment's corrected export pixels) instead
+    of reusing ``context_latent``. Used by the exposure-anchor feedback loop so
+    the per-segment exposure correction actually feeds into the next segment's
+    pin — otherwise brightness drift accumulates along the latent chain and the
+    pixel-only correction cannot reach it. Audio is unaffected (exposure is
+    visual): it still pins from ``context_latent`` when that latent is usable.
     """
     import node_helpers
 
@@ -382,6 +391,18 @@ def apply_motion_context(
             )
         available = int(context_frames.shape[0])
         video_src = "pixels"
+
+    # 曝光锚定闭环：强制视频 pin 用上段「校正后导出像素」重新 VAE 编码，而非未校正的
+    # context_latent——否则逐段亮度漂移沿 latent 链累积，像素级校正无法反馈到下一段。
+    # 音频不受影响（亮度是视觉量）：pin_audio_latent 保持 context_latent（尺寸匹配时），
+    # 仅在 Refine 尺寸不匹配等场景已被置空时才回退到 context_audio 重编码。
+    if (
+        video_from_frames
+        and context_frames is not None
+        and int(context_frames.shape[0]) >= 1
+    ):
+        video_src = "pixels"
+        available = int(context_frames.shape[0])
 
     n = min(int(context_length), available)
     if n < 1:

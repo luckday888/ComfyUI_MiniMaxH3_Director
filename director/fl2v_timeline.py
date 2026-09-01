@@ -736,12 +736,14 @@ def build_fl2v_director_plan(
     from .segment_continuity import (
         resolve_continuity_settings,
         resolve_exposure_anchor_enabled,
+        resolve_exposure_anchor_strength,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
     exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
+    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     run_indices = (
         frozenset(selected_plan_indices) if run_sel is not None else None
     )
@@ -768,4 +770,5 @@ def build_fl2v_director_plan(
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
         exposure_anchor_enabled=exposure_anchor_enabled,
+        exposure_anchor_strength=exposure_anchor_strength,
     )

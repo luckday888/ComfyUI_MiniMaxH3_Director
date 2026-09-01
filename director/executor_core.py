@@ -654,6 +654,12 @@ def execute_director_plan_core(
                 audio_mode != AUDIO_MODE_MUTE
                 and (prev_av is not None or prev_audio is not None)
             )
+            # 曝光锚定闭环：视频 pin 用上段「校正后导出像素」re-encode，阻断亮度漂移
+            # 沿 latent 链逐段累积（仅像素校正无法反馈到下段）；音频仍从 prev_av 切。
+            video_from_frames = bool(
+                getattr(plan, "exposure_anchor_enabled", True)
+                and prev_tail is not None
+            )
             positive, trim_frames, prev_export_trim = apply_motion_context(
                 positive,
                 latent,
@@ -671,6 +677,7 @@ def execute_director_plan_core(
                 keep_existing_keyframes=(seg.task_key == "fl2v"),
                 context_end_frame=prev_end_frame,
                 audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                video_from_frames=video_from_frames,
             )
             # Phase-align can pin a few frames before the previous export end.
             # Drop that orphaned tail so concat does not replay it at the seam.
@@ -1056,9 +1063,10 @@ def execute_director_plan_core(
         decoded, audio_dict = _decode_av_latent(
             samples, vae, audio_vae, decode_audio=decode_audio,
         )
-        # 段间引导「曝光锚定」：自由区逐段变亮的反馈校正。把 pin 头之后的自由
-        # 区 per-channel 均值拉回上一段收尾曝光（以上一段校正后导出帧为锚点），
-        # 只调全局曝光、不混合像素。pin 头保持原样，随后随 trim 丢弃。
+        # 段间引导「曝光锚定」：自由区逐段变亮的反馈校正。锚点取本段 pin 头
+        # 末尾（上段 latent 直传解码、不被本函数改写），把自由区整体曝光拉回
+        # 衔接起点——只调全局曝光、不混合像素，且不跨段复合放大。pin 头原样
+        # 保留，随后随 trim 丢弃。
         if (
             getattr(plan, "exposure_anchor_enabled", True)
             and use_motion_context
@@ -1067,8 +1075,8 @@ def execute_director_plan_core(
             decoded = anchor_free_region_exposure(
                 decoded,
                 trim_frames=trim_frames,
-                anchor_frames=prev_tail,
                 seg_index=seg.index,
+                strength=float(getattr(plan, "exposure_anchor_strength", 0.08)),
             )
         # Keep the full model-generated free region after the ctx head trim
         # (sample-trim) for motion-context segments — cropping back to num_frames
