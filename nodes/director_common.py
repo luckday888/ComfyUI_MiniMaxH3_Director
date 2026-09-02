@@ -329,7 +329,16 @@ def _layout_image_batches(
         images_out = segment_outputs
         frame_count = sum(int(s.shape[0]) for s in segment_outputs)
         return images_out, frame_count
-    combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
+    # Motion context: interior segments keep the full model-generated free
+    # region (longer than the UI segment by the grid-align remainder), so the
+    # merged clip is naturally longer than plan.total_frames. Do not crop it
+    # back to the UI total here — that cuts the ending audio fade-out and drifts
+    # out of sync with the audio concatenated at real segment lengths. The
+    # non-continuity path keeps the old behavior (crop to the UI total).
+    if getattr(plan, "continuity_enabled", False):
+        combined = combined.cpu().float()
+    else:
+        combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
     return [combined], int(combined.shape[0])
 
 
