@@ -311,9 +311,10 @@ export function maxDurationSec() {
 
 /**
  * Frame count for a duration, capped to MAX_GEN_FRAMES on the 17k+5 grid.
- * 返回的 durationSec 始终是该帧数对应的「规范化」秒数（preferredDurationSecFromFrames），
- * 而不是用户输入的原始秒数。否则同一帧数在不同代码路径会显示成不同秒数
- * （例如 498 帧正向取整得 20.7、反向规范化得 20.5），输入框被反复改写、难以编辑。
+ * durationSec is always the normalized seconds for that frame count
+ * (preferredDurationSecFromFrames). Returning the raw typed seconds would
+ * make the same frame count display as 20.7 vs 20.5 on different paths and
+ * fight the input while the user is editing.
  */
 export function durationToClampedMiniMaxFrames(seconds, fps = 24) {
     let sec = roundDurationSec(seconds);

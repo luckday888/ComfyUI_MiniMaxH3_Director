@@ -487,7 +487,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-refsize select{background:#161616;border:1px solid #3a3a3a;border-radius:6px;color:#eee;padding:5px 6px;font-size:12px;max-width:88px}
 .bd-batch-del{background:transparent;border:1px solid #553;color:#f88;border-radius:4px;padding:3px 8px;font-size:10px;cursor:pointer}
 .bd-batch-r2v .bd-batch-del{border-radius:8px;padding:5px 10px;font-size:11px;border-color:#4a3030;color:#f0a0a0}
-.bd-batch-del:hover{background:#3a1515}
+.bd-batch-del:disabled{border-color:#3a3a3a;color:#777;opacity:.55;cursor:not-allowed}
+.bd-batch-del:not(:disabled):hover{background:#3a1515}
 .bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:140px}
 .bd-batch-media .bd-r2v-pick-existing{align-self:stretch;text-align:center}
 /* Left = assets (narrower) · Right = prompt + preview (wider) */
@@ -2338,6 +2339,7 @@ export function renderImageBatchGroups(editor) {
         if (!seg) continue;
         appendBatchCard(list, editor, seg, index, ctx);
     }
+    updateR2vToolbarBtns(editor);
     refreshPromptTokenEditors(list);
     editor.updateDomWidgetHeight?.();
 }
@@ -2460,8 +2462,8 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             seg._videoFrameCount = frames;
             secRow.innerHTML = `${t("batch.seconds")} <input type="number" data-batch-sec-index="${index}" data-batch-seg-id="${seg.id || ""}" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="${t("batch.durationTooltip", { frames, play: playSec })}">`;
             const secInput = secRow.querySelector("input");
-            // 聚焦编辑期间不要回写 value/title：帧对齐会把 20.7↔20.5 之类的中间值反复
-            // 改写回输入框，导致用户边打字边被打断、数值「卡住」。失焦时再统一规范化显示。
+            // Do not rewrite value/title while focused: frame snapping would
+            // bounce 20.7↔20.5 and interrupt typing. Normalize on blur.
             let secFocused = false;
             secInput.addEventListener("focus", () => { secFocused = true; });
             const applySec = () => {
@@ -3064,13 +3066,15 @@ export function setR2vToolbar(editor, enabled) {
             del.classList.add("hidden");
             del.disabled = true;
         } else {
-            del.disabled = false;
-            del.classList.remove("bd-disabled", "hidden");
+            const deleteDisabled = enabled && (editor.timeline?.segments?.length || 0) <= 1;
+            del.disabled = deleteDisabled;
+            del.classList.toggle("bd-disabled", deleteDisabled);
+            del.classList.remove("hidden");
             del.textContent = enabled ? t("toolbar.deleteSelectedGroup") : t("toolbar.deleteSegment");
             del.setAttribute("data-i18n", enabled ? "toolbar.deleteSelectedGroup" : "toolbar.deleteSegment");
-            del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedFl2vGroup" : "tooltip.deleteSegment");
+            del.setAttribute("data-i18n-title", enabled ? "tooltip.deleteSelectedR2vGroup" : "tooltip.deleteSegment");
             del.title = enabled
-                ? t("tooltip.deleteSelectedFl2vGroup")
+                ? t("tooltip.deleteSelectedR2vGroup")
                 : t("tooltip.deleteSegment");
         }
     }
@@ -3086,9 +3090,23 @@ export function setR2vToolbar(editor, enabled) {
 
 export function updateR2vToolbarBtns(editor) {
     const addBtn = editor?.root?.querySelector?.('[data-a="r2v-add-group"]');
-    if (!addBtn) return;
     const externalLocked = !!(editor?.hasExternalI2vGroups?.() || editor?.hasExternalR2vGroups?.());
-    const show = !!editor?.isR2vBatch?.() && !externalLocked;
-    addBtn.classList.toggle("hidden", !show);
-    addBtn.disabled = !show;
+    const isR2v = !!editor?.isR2vBatch?.();
+    const show = isR2v && !externalLocked;
+    if (addBtn) {
+        addBtn.classList.toggle("hidden", !show);
+        addBtn.disabled = !show;
+    }
+    if (!isR2v) return;
+
+    const del = editor?.root?.querySelector?.('[data-a="del"]');
+    if (!del) return;
+    const canDelete = !externalLocked && (editor.timeline?.segments?.length || 0) > 1;
+    del.classList.toggle("hidden", externalLocked);
+    del.disabled = !canDelete;
+    del.classList.toggle("bd-disabled", !canDelete);
+    del.textContent = t("toolbar.deleteSelectedGroup");
+    del.setAttribute("data-i18n", "toolbar.deleteSelectedGroup");
+    del.setAttribute("data-i18n-title", "tooltip.deleteSelectedR2vGroup");
+    del.title = t("tooltip.deleteSelectedR2vGroup");
 }

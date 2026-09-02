@@ -544,28 +544,24 @@ function insertAtCaret(editor, insertText, getMedia, options, { replaceFrom = nu
     return next;
 }
 
-// 序列化标签字符串层的删除：contenteditable=false 的 chip 会让浏览器报告的光标位置
-// 多变（chip 正前方的元素级位置、chip 之后文本节点的行首位置、键盘 Home/方向键落点都
-// 不同），DOM 节点判断无法覆盖。这里在官方标签字符串上按「原子单位（整个 tag / 单个
-// 字符 / 换行符）」删除，并用「光标到行首之间是否只有 chip 与空白」识别行首合并区，
-// 让行首 Delete 删除上一处换行来合并行、而不是删掉行首 chip 或行首字符。
+// Serialized tag-string deletes: contenteditable=false chips make native caret
+// positions unreliable (element-level before a chip, text-node start after a
+// chip, Home / arrow landings). Operate on official tags as atomic units.
 const SERIAL_TAG_AT = /^<(?:Picture|Video|Audio)\s+\d+\s*>/i;
 const SERIAL_TAG_BEFORE = /<(?:Picture|Video|Audio)\s+\d+\s*>$/i;
 const SERIAL_TAG_GLOBAL = /<(?:Picture|Video|Audio)\s+\d+\s*>/gi;
 
-/** Delete 键（向前删）。返回 {text, caret} 或 null（无可删）。 */
+/** Delete key (forward). Returns {text, caret} or null if nothing to delete. */
 function serializedDeleteForward(full, offset) {
-    // 当前行首 = 光标之前最近的换行之后。
     const lineStart = full.lastIndexOf("\n", offset - 1) + 1;
-    // 光标到行首之间去掉 chip 标签与空白后若为空，说明光标处于「行首合并区」
-    // （行首可能隔着 chip；键盘 Home 常把光标落在 chip 之后的文本开头）。
+    // If only chips/whitespace sit between line start and the caret, Delete
+    // should join this line to the previous one instead of eating the chip.
     const headHasText =
         full
             .slice(lineStart, offset)
             .replace(SERIAL_TAG_GLOBAL, "")
             .replace(/\s+/g, "").length > 0;
     if (!headHasText && lineStart > 0) {
-        // 删除行首前的换行符合并到上一行，保留行首 chip。
         return { text: full.slice(0, lineStart - 1) + full.slice(lineStart), caret: lineStart - 1 };
     }
     const tagLen = SERIAL_TAG_AT.exec(full.slice(offset))?.[0]?.length || 0;
@@ -578,7 +574,7 @@ function serializedDeleteForward(full, offset) {
     return null;
 }
 
-/** Backspace 键（向后删）：光标前是整个 chip 则删 chip，否则删前一个字符（含换行）。 */
+/** Backspace: delete a whole chip before the caret, else the previous character. */
 function serializedDeleteBackward(full, offset) {
     if (offset <= 0) return null;
     const tagLen = SERIAL_TAG_BEFORE.exec(full.slice(0, offset))?.[0]?.length || 0;
@@ -820,6 +816,70 @@ function writeTextareaValue(textarea, value) {
     } finally {
         textarea.__bdTokenSyncing = false;
     }
+}
+
+// ComfyUI/litegraph listens for copy/cut/paste on window in the capture phase.
+// When the target is inside a canvas DOM widget (this chip editor), it
+// stopPropagation so editor-level and even document listeners never fire.
+// Copy then only keeps the chip's visible label and drops <Picture>/<Video>/<Audio>.
+// stopPropagation does not block other window-capture listeners, so register
+// once here and dispatch via rich.__bdClipboard (see wirePromptImageMentions).
+let __bdClipboardHookInstalled = false;
+function installGlobalClipboardHook() {
+    if (__bdClipboardHookInstalled) return;
+    __bdClipboardHookInstalled = true;
+
+    const editorFromSelection = () => {
+        const sel = window.getSelection();
+        if (!sel || !sel.rangeCount) return null;
+        const node = sel.anchorNode;
+        const el = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+        const editor =
+            el && typeof el.closest === "function" ? el.closest(".bd-token-editor") : null;
+        return editor && editor.__bdClipboard ? editor : null;
+    };
+
+    window.addEventListener(
+        "copy",
+        (e) => {
+            const editor = editorFromSelection();
+            if (!editor) return;
+            const text = editor.__bdClipboard.serializedSelectionText();
+            if (!text || !e.clipboardData) return;
+            e.preventDefault();
+            e.stopImmediatePropagation?.();
+            e.clipboardData.setData("text/plain", text);
+        },
+        true,
+    );
+
+    window.addEventListener(
+        "cut",
+        (e) => {
+            const editor = editorFromSelection();
+            if (!editor) return;
+            const text = editor.__bdClipboard.serializedSelectionText();
+            if (!text || !e.clipboardData) return;
+            e.preventDefault();
+            e.stopImmediatePropagation?.();
+            e.clipboardData.setData("text/plain", text);
+            editor.__bdClipboard.cutSelection();
+        },
+        true,
+    );
+
+    window.addEventListener(
+        "paste",
+        (e) => {
+            const editor = editorFromSelection();
+            if (!editor) return;
+            e.preventDefault();
+            e.stopImmediatePropagation?.();
+            const text = (e.clipboardData || window.clipboardData)?.getData("text/plain") || "";
+            editor.__bdClipboard.pasteText(text.replace(/\r\n/g, "\n"));
+        },
+        true,
+    );
 }
 
 /**
@@ -1098,17 +1158,15 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) openIfMention();
     });
 
-    // 选区的官方标签文本（chip 写成 <Picture N>/<Video K>/<Audio J>）。剪贴板原生
-    // text/plain 只带芯片的可见 label，不接管的话复制会丢标签、@ 的媒体无法复制。
     const serializedSelectionText = () => {
         const { start, end } = serializedSelectionOffsets(rich);
         if (end <= start) return "";
         return serializeTokenEditor(rich).slice(start, end);
     };
 
-    // 剪贴板事件在画布内会被全局 window-capture 监听器截走（见 installGlobalClipboardHook
-    // 的注释），绑在 rich 上的 copy/cut/paste 永远收不到。这里把本编辑器的操作闭包挂到
-    // rich.__bdClipboard，由唯一的全局 window-capture hook 按选区找到本编辑器后调用。
+    // Clipboard events inside the canvas are swallowed by the global window-capture
+    // listener (see installGlobalClipboardHook). Hang this editor's ops on
+    // rich.__bdClipboard so the single hook can find us from the selection.
     rich.__bdClipboard = {
         serializedSelectionText,
         cutSelection() {
@@ -1127,11 +1185,10 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
     };
     installGlobalClipboardHook();
 
-    // When the caret sits at the element level (directly before/after a chip, at the
-    // start of a line, or at the editor edge) rather than inside a text node, native
-    // typing is unreliable around contenteditable=false chips — text may fail to insert
-    // or land in the wrong spot. Route those keystrokes through the serialized editor
-    // so text can always be typed directly before an @-chip (including a line-leading one).
+    // When the caret sits at the element level (directly before/after a chip,
+    // line start, or editor edge) rather than inside a text node, native typing
+    // around contenteditable=false chips is unreliable. Route those keystrokes
+    // through the serialized editor.
     rich.addEventListener("beforeinput", (e) => {
         if (composing) return;
         const sel = window.getSelection();
@@ -1176,9 +1233,9 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
             }
         }
 
-        // Backspace/Delete 在序列化标签字符串层处理（见 serializedDeleteForward/
-        // Backward 的注释）。DOM 节点判断覆盖不到键盘 Home/方向键落到 chip 之后文本
-        // 节点的情况，导致行首 Delete 误删行首字符/芯片而不是合并行。
+        // Backspace/Delete on the serialized tag string (see serializedDelete*).
+        // DOM-neighbor checks miss Home/arrow landings after a chip, so Delete
+        // at line start would eat the chip or first character instead of joining lines.
         if (e.key === "Backspace" || e.key === "Delete") {
             const sel = window.getSelection();
             if (!sel || !sel.isCollapsed || !sel.rangeCount) return;
