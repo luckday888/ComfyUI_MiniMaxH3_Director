@@ -59,6 +59,7 @@ from .h3_motion_context import (
 )
 from .segment_cache import (
     load_first_pass_cache,
+    load_first_pass_frames_stale,
     load_segment_audio,
     load_segment_av_latent,
     load_segment_cache,
@@ -225,7 +226,10 @@ def _build_minimax_inputs(
             ref_video = reference_video_for_segment(plan, seg, num_frames=nframes)
             if ref_video is not None and ref_video.shape[0] > 0:
                 ref_videos = {"ref_video_0": ref_video}
-        ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
+        ref_audios = ref_audios_to_dict(
+            getattr(seg, "ref_audios", None) or [],
+            cache=getattr(plan, "audio_decode_cache", None),
+        )
         ref_video_audios = _ref_video_audios_to_dict(getattr(seg, "ref_video_audios", None) or [])
     elif task_key in {"v2v", "rv2v"}:
         # Bernini-style video edit: each timeline segment's source clip → <Video 1>.
@@ -248,9 +252,50 @@ def _build_minimax_inputs(
                 ref_images[f"ref_image_{idx}"] = tensor[:1] if tensor.ndim == 4 else tensor
             if not ref_images:
                 ref_images = None
-            ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
+            ref_audios = ref_audios_to_dict(
+                getattr(seg, "ref_audios", None) or [],
+                cache=getattr(plan, "audio_decode_cache", None),
+            )
 
     return first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios
+
+
+def _release_segment_file_ref_audios(plan: DirectorPlan, seg) -> None:
+    """Drop decoded per-segment file PCM; keep execution-shared/global slots.
+
+    Mux happens after all segments. Unique file slots are rematerialized from
+    ``audio_path`` (and may re-decode once). Shared/global objects stay live.
+    """
+    shared_ids = {id(item) for item in (getattr(plan, "global_ref_audios", None) or [])}
+    cache = getattr(plan, "audio_decode_cache", None)
+    for item in getattr(seg, "ref_audios", None) or []:
+        if id(item) in shared_ids:
+            continue
+        path = str(getattr(item, "audio_path", "") or "").strip()
+        if not path:
+            continue
+        item.audio = None
+        if isinstance(cache, dict):
+            cache.pop(path, None)
+
+
+def _prune_continuity_working_set(
+    next_segment_index: int,
+    av_latents: dict[int, dict],
+    refine_passes: dict[int, list[tuple[str, torch.Tensor]]],
+) -> None:
+    """Keep only the direct predecessor needed by the next segment.
+
+    Final/pre-refine frames and export audio live in separate collections and
+    are intentionally untouched. A missing direct predecessor is loaded from
+    the existing disk cache by the continuity path.
+    """
+    current = int(next_segment_index)
+    keep = current - 1
+    for working_set in (av_latents, refine_passes):
+        for index in tuple(working_set):
+            if int(index) < current and int(index) != keep:
+                working_set.pop(index, None)
 
 
 def _ref_video_audios_to_dict(items) -> dict | None:
@@ -1201,12 +1246,23 @@ def execute_director_plan_core(
         return chunk, audio_dict, pre_chunk
 
     for seg in all_segments:
+        # AV latent and decoded refine-pass clips are a rolling continuity
+        # working set, not final outputs. At the start of segment N, only N-1
+        # can still be consumed; older entries have already been persisted.
+        _prune_continuity_working_set(
+            seg.index,
+            completed_av_latents,
+            completed_refine_passes,
+        )
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
                 cleanup_segment_vram(enabled=True)
-            chunk, audio_dict, pre_chunk = _run_one_segment(
-                seg, progress_index=progress_pos[seg.index]
-            )
+            try:
+                chunk, audio_dict, pre_chunk = _run_one_segment(
+                    seg, progress_index=progress_pos[seg.index]
+                )
+            finally:
+                _release_segment_file_ref_audios(plan, seg)
             segment_outputs.append(chunk)
             segment_pre_refine.append(pre_chunk)
             segment_audios.append(audio_dict or {})
@@ -1229,7 +1285,16 @@ def execute_director_plan_core(
         if cached is not None:
             cached = cached.float()
             completed_outputs[seg.index] = cached
-            completed_pre_refine[seg.index] = cached
+            # images_pre_refine fill prefers the first-pass render (.pre.pt) so
+            #「选择运行」re-roll previews merge all-first-pass frames instead of
+            # mixing fresh 一采 with cached 二采. Falls back to the final render
+            # when no first-pass cache exists (e.g. refine was never connected).
+            pre_fill = load_first_pass_frames_stale(
+                node_id, seg, plan, match_len=int(cached.shape[0])
+            )
+            completed_pre_refine[seg.index] = (
+                pre_fill if pre_fill is not None else cached
+            )
             cached_audio = load_segment_audio(
                 node_id, seg, plan, allow_stale=used_stale
             )
@@ -1253,7 +1318,7 @@ def execute_director_plan_core(
                 f"({cached.shape[0]} frames{audio_note}{stale_note})"
             )
             output_chunks.append(cached)
-            output_pre_chunks.append(cached)
+            output_pre_chunks.append(completed_pre_refine[seg.index])
             output_segments.append(seg)
             continue
 
