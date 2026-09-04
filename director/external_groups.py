@@ -637,5 +637,4 @@ def build_plan_from_external_groups(
         continuity_overlap_frames=continuity_overlap,
         exposure_anchor_enabled=exposure_anchor_enabled,
         exposure_anchor_strength=exposure_anchor_strength,
-        global_ref_audios=list(common_audios_raw) if family == "r2v" else [],
     )

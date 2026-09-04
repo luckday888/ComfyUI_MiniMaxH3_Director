@@ -420,11 +420,8 @@ function ensureFirstPassCacheUI(node) {
         refreshFirstPassCacheStatus(node);
     });
     const body = document.createElement("div");
-    body.style.cssText = "white-space:pre-wrap;word-break:break-word;user-select:text;cursor:text";
+    body.style.cssText = "white-space:pre-wrap;word-break:break-word";
     body.textContent = "等待检查…";
-    for (const eventName of ["pointerdown", "mousedown", "click"]) {
-        body.addEventListener(eventName, (event) => event.stopPropagation());
-    }
     header.append(title, refresh);
     root.append(header, body);
     const widget = node.addDOMWidget(CACHE_STATUS_WIDGET, "cache_status", root, {
@@ -602,13 +599,6 @@ app.registerExtension({
         };
     },
     nodeCreated(node) {
-        const cls = node?.comfyClass || node?.type || "";
-        if (DIRECTOR_CLASSES.has(cls)) {
-            node._mmxRefreshFirstPassCache = (delay = 0) => {
-                refreshCacheStatusForDirector(node, delay);
-            };
-            return;
-        }
         scheduleRefineRefresh(node);
     },
     loadedGraphNode(node) {
