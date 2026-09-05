@@ -169,6 +169,19 @@ function isExposureAnchorEnabled(output) {
     return true;
 }
 
+/** Audio continuity (segment companion): default on; only explicit off is false. */
+function isAudioContinuityEnabled(output) {
+    if (!output) return true;
+    const raw = output.audioContinuityEnabled ?? output.audio_continuity_enabled;
+    if (raw == null) return true;
+    if (raw === false || raw === 0) return false;
+    if (typeof raw === "string") {
+        const s = raw.trim().toLowerCase();
+        return s !== "false" && s !== "0" && s !== "no" && s !== "off" && s !== "";
+    }
+    return true;
+}
+
 /** Exposure anchor strength (percent 0–60, default 40). Tolerates legacy fractions (0.4). */
 function getExposureAnchorStrength(output) {
     if (!output) return 40;
@@ -232,6 +245,7 @@ function normalizeOutputContinuity(output = {}) {
         continuityOverlapFrames: snapContinuityFrames(rawOverlap),
         exposureAnchorEnabled: isExposureAnchorEnabled(output),
         exposureAnchorStrength: getExposureAnchorStrength(output),
+        audioContinuityEnabled: isAudioContinuityEnabled(output),
         audioMode: normalizeAudioMode(output.audioMode ?? output.audio_mode),
         refImageSize: normalizeRefImageSize(output.refImageSize ?? output.ref_image_size),
     };
@@ -2852,6 +2866,9 @@ class MiniMaxH3DirectorEditor {
                     <option value="mute" data-i18n="output.audio.mute">静音</option>
                 </select>
             </span>
+            <span class="bd-out-audio-wrap hidden" data-r="audio-continuity-wrap" data-i18n-title="tooltip.audioContinuity">
+                <label style="white-space:nowrap"><input type="checkbox" data-r="audio-continuity-cb" checked><span data-i18n="output.audioContinuity">音频接续</span></label>
+            </span>
             <span class="bd-out-source-wrap hidden" data-r="out-source-wrap" data-i18n-title="widget.tooltip.exportSourceImages">
                 <label>
                     <input type="checkbox" data-r="out-export-source">
@@ -2864,6 +2881,7 @@ class MiniMaxH3DirectorEditor {
             <select class="bd-select" data-r="out-export-mode" data-i18n-title="tooltip.exportMode">
                 <option value="all" data-i18n="output.exportMode.all">全部导出</option>
                 <option value="segments" data-i18n="output.exportMode.segments">分段导出</option>
+                <option value="selection" data-i18n="output.exportMode.selection">选择导出</option>
             </select>
             <span class="hidden" data-r="out-max-frames-wrap" hidden aria-hidden="true">
                 <label data-i18n="output.maxFrames">最大帧数</label>
@@ -3181,6 +3199,8 @@ class MiniMaxH3DirectorEditor {
         this.fpsInput = this.root.querySelector('[data-r="timeline-fps"]');
         this.outAudioWrap = this.root.querySelector('[data-r="out-audio-wrap"]');
         this.outAudioMode = this.root.querySelector('[data-r="out-audio-mode"]');
+        this.audioContinuityWrap = this.root.querySelector('[data-r="audio-continuity-wrap"]');
+        this.audioContinuityCb = this.root.querySelector('[data-r="audio-continuity-cb"]');
         this.exportSourceImagesWrap = this.root.querySelector('[data-r="out-source-wrap"]');
         this.exportSourceImagesCb = this.root.querySelector('[data-r="out-export-source"]');
         this.outMaxFrames = this.root.querySelector('[data-r="out-max-frames"]');
@@ -3456,7 +3476,14 @@ class MiniMaxH3DirectorEditor {
         this.outMaxFrames.onchange = () => this.onOutputField("maxExportFrames", +this.outMaxFrames.value);
         this.outExportMode.onchange = () => this.onOutputField("exportMode", this.outExportMode.value);
         if (this.outAudioMode) {
-            this.outAudioMode.onchange = () => this.onOutputField("audioMode", this.outAudioMode.value);
+            this.outAudioMode.onchange = () => {
+                this.onOutputField("audioMode", this.outAudioMode.value);
+                this.updateAudioContinuityUI();
+            };
+        }
+        if (this.audioContinuityCb) {
+            this.audioContinuityCb.onchange = () =>
+                this.onOutputField("audioContinuityEnabled", !!this.audioContinuityCb.checked);
         }
         if (this.exportSourceImagesCb) {
             this.exportSourceImagesCb.onchange = () => {
@@ -4100,9 +4127,12 @@ class MiniMaxH3DirectorEditor {
             this.runSelectSummary.style.color = "#aaa";
         } else {
             const nums = (this.timeline.runSelection || []).map((i) => i + 1).join(", ");
-            const exportHint = this.timeline.output?.exportMode === "segments"
+            const runExportMode = this.timeline.output?.exportMode;
+            const exportHint = runExportMode === "segments"
                 ? t("runSelect.exportOnlyChecked")
-                : t("runSelect.fillUnchecked");
+                : runExportMode === "selection"
+                    ? t("runSelect.exportSelection")
+                    : t("runSelect.fillUnchecked");
             this.runSelectSummary.textContent = count === 1
                 ? t("runSelect.sampleOne", { unit: label, nums, hint: exportHint })
                 : t("runSelect.sampleMany", { count, unit: label, nums, hint: exportHint });
@@ -6054,6 +6084,7 @@ class MiniMaxH3DirectorEditor {
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
+            audioContinuityEnabled: true,
         };
         // Prefer ResolutionSelector fields; backfill from width/height when missing.
         // Custom keeps explicit width/height and does not recompute from megapixels.
@@ -6088,7 +6119,10 @@ class MiniMaxH3DirectorEditor {
         if (this.outW) this.outW.value = String(out.width ?? 864);
         if (this.outH) this.outH.value = String(out.height ?? 480);
         if (this.outMaxFrames) this.outMaxFrames.value = String(out.maxExportFrames ?? 0);
-        if (this.outExportMode) this.outExportMode.value = out.exportMode === "segments" ? "segments" : "all";
+        if (this.outExportMode) {
+            const em = out.exportMode === "segments" || out.exportMode === "selection" ? out.exportMode : "all";
+            this.outExportMode.value = em;
+        }
         if (this.outAudioMode) {
             const am = normalizeAudioMode(out.audioMode);
             this.outAudioMode.value = am;
@@ -6097,6 +6131,7 @@ class MiniMaxH3DirectorEditor {
                 this.timeline.output = { ...out };
             }
         }
+        if (this.audioContinuityCb) this.audioContinuityCb.checked = isAudioContinuityEnabled(out);
         if (this.segmentContinuityCb) this.segmentContinuityCb.checked = isContinuityEnabled(out);
         if (this.segmentContinuityOverlap) {
             this.segmentContinuityOverlap.value = String(
@@ -6112,6 +6147,7 @@ class MiniMaxH3DirectorEditor {
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
         this.updateSegmentContinuityUI();
+        this.updateAudioContinuityUI();
         this.syncExportSourceImagesUI();
         this.updateOutputPreview();
     }
@@ -6168,6 +6204,20 @@ class MiniMaxH3DirectorEditor {
         }
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
+    }
+
+    /** 音频接续 toggle: only relevant for multi-segment runs with audible audio. */
+    updateAudioContinuityUI() {
+        if (!this.audioContinuityWrap) return;
+        const audioMode = normalizeAudioMode(this.timeline?.output?.audioMode);
+        const show = isContinuityEligible(this) && audioMode !== "mute";
+        this.audioContinuityWrap.classList.toggle("hidden", !show);
+        this.audioContinuityWrap.hidden = !show;
+        this.audioContinuityWrap.setAttribute("aria-hidden", show ? "false" : "true");
+        if (this.audioContinuityCb && this.timeline?.output) {
+            // Eligibility only gates visibility; keep DOM aligned with saved preference.
+            this.audioContinuityCb.checked = isAudioContinuityEnabled(this.timeline.output);
+        }
     }
 
     /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */
@@ -6361,9 +6411,12 @@ class MiniMaxH3DirectorEditor {
 
     _exportPreviewSuffix() {
         const cap = this.getMaxExportFrames();
-        const exportMode = this.timeline.output?.exportMode === "segments"
+        const previewExportMode = this.timeline.output?.exportMode;
+        const exportMode = previewExportMode === "segments"
             ? t("output.preview.segmentExport")
-            : "";
+            : previewExportMode === "selection"
+                ? t("output.preview.selectionExport")
+                : "";
         const dur = this.getTimelineDurationSec().toFixed(2);
         const fps = formatProbeFps(this.getFrameRate());
         const timeHint = t("output.preview.timeFps", { dur, fps });
@@ -6388,6 +6441,7 @@ class MiniMaxH3DirectorEditor {
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
+            audioContinuityEnabled: true,
         };
         if (key === "aspectRatio") {
             if (isCustomAspectRatio(value)) {
@@ -6433,9 +6487,12 @@ class MiniMaxH3DirectorEditor {
             const n = parseInt(value, 10);
             this.timeline.output.maxExportFrames = Number.isFinite(n) && n > 0 ? n : 0;
         } else if (key === "exportMode") {
-            this.timeline.output.exportMode = value === "segments" ? "segments" : "all";
+            this.timeline.output.exportMode =
+                value === "segments" || value === "selection" ? value : "all";
         } else if (key === "audioMode") {
             this.timeline.output.audioMode = normalizeAudioMode(value);
+        } else if (key === "audioContinuityEnabled") {
+            this.timeline.output.audioContinuityEnabled = !!value;
         } else if (key === "continuityEnabled") {
             this.timeline.output.continuityEnabled = !!value;
         } else if (key === "continuityOverlapFrames") {
@@ -6527,6 +6584,7 @@ class MiniMaxH3DirectorEditor {
             continuityOverlapFrames: snapContinuityFrames(
                 prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
             ),
+            audioContinuityEnabled: isAudioContinuityEnabled(prevOut),
         };
         if (this.widthWidget) this.widthWidget.value = resolved.width;
         if (this.heightWidget) this.heightWidget.value = resolved.height;
@@ -6557,6 +6615,7 @@ class MiniMaxH3DirectorEditor {
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
+            audioContinuityEnabled: true,
         };
         if (this.timeline.output.audioMode == null) {
             this.timeline.output.audioMode = "generate";
@@ -6612,6 +6671,7 @@ class MiniMaxH3DirectorEditor {
         if (this.isRunSelectEnabled()) this.normalizeRunSelection();
         this.updateRunSelectUI();
         this.updateSegmentContinuityUI();
+        this.updateAudioContinuityUI();
         if (this.taskTypeWidget) this.taskTypeWidget.value = this.timeline.global.taskType;
         if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt;
         if (this.negativePromptWidget) {

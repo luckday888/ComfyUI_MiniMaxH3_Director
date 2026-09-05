@@ -340,6 +340,25 @@ def _prune_continuity_working_set(
                 working_set.pop(index, None)
 
 
+def _consecutive_index_groups(run_list: list[int]) -> list[list[int]]:
+    """Split sorted segment indices into maximal consecutive runs.
+
+    Returns groups of *positions* into ``run_list`` (aligned with the run-order
+    chunk / audio lists), not segment indices. E.g. run indices [0,1,3,4,6] →
+    [[0,1],[2,3],[4]] — three export clips (segments 1-2 merged, 4-5 merged, 7).
+    """
+    groups: list[list[int]] = []
+    current: list[int] = []
+    for pos, idx in enumerate(run_list):
+        if current and int(idx) != int(run_list[pos - 1]) + 1:
+            groups.append(current)
+            current = []
+        current.append(pos)
+    if current:
+        groups.append(current)
+    return groups
+
+
 def execute_director_plan_core(
     plan: DirectorPlan,
     *,
@@ -518,6 +537,7 @@ def execute_director_plan_core(
     # replaces older IMAGE slots with 1-frame posters.
     segment_export_lengths: dict[int, int] = {}
     export_segments_mode = plan.export_mode == "segments"
+    export_selection_mode = plan.export_mode == "selection"
 
     def _run_one_segment(
         seg, *, progress_index: int
@@ -771,8 +791,11 @@ def execute_director_plan_core(
         if use_motion_context:
             # Pin audio from previous AV latent whenever available (official MC path).
             # Do not gate on decode_audio — mute only skips final audio decode.
+            # audio_continuity_enabled=False: video still stitches via motion context,
+            # but each segment keeps its own audio (hard cut across the seam).
             pin_audio = (
                 audio_mode != AUDIO_MODE_MUTE
+                and getattr(plan, "audio_continuity_enabled", True)
                 and (prev_av is not None or prev_audio is not None)
             )
             positive, trim_frames, prev_export_trim = apply_motion_context(
@@ -1570,6 +1593,41 @@ def execute_director_plan_core(
         reports.append(
             "Export mode: segments — released prior-segment pixels after mp4 "
             "and continuity pin (no full-timeline concat)."
+        )
+    elif export_selection_mode:
+        # 选择导出: merge each maximal run of consecutive selected segments into
+        # one clip; non-consecutive runs become separate clips. The images list
+        # (one merged tensor per group) naturally drives CreateVideo/SaveVideo to
+        # emit one video per group. Unselected segments never enter the result
+        # (their cache is still read for a continuity pin inside _run_one_segment).
+        groups = _consecutive_index_groups(run_list)
+        plan.selection_export_groups = groups
+        group_chunks: list[torch.Tensor] = []
+        group_pre: list[torch.Tensor] = []
+        group_desc: list[str] = []
+        for pos_group in groups:
+            idx_group = [int(run_list[p]) for p in pos_group]
+            chunks = [export_chunks[p] for p in pos_group]
+            segs = [all_segments[idx] for idx in idx_group]
+            group_chunks.append(concat_continuous_chunks(chunks, segs, plan))
+            pre_chunks = [
+                export_pre_chunks[p] if p < len(export_pre_chunks) else export_chunks[p]
+                for p in pos_group
+            ]
+            group_pre.append(concat_continuous_chunks(pre_chunks, segs, plan))
+            group_desc.append(
+                f"#{idx_group[0] + 1}"
+                if len(idx_group) == 1
+                else f"#{idx_group[0] + 1}–{idx_group[-1] + 1}"
+            )
+        segment_outputs = group_chunks
+        segment_pre_refine = group_pre
+        fallback = torch.full((1, 1, 1, 3), 0.5)
+        combined = group_chunks[-1] if group_chunks else fallback
+        pre_combined = group_pre[-1] if group_pre else combined
+        reports.append(
+            "Export mode: selection — merged consecutive selected segments into "
+            f"{len(group_chunks)} clip(s): {', '.join(group_desc)}."
         )
     else:
         combined = concat_continuous_chunks(export_chunks, export_segments, plan)
