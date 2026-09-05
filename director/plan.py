@@ -125,8 +125,9 @@ class SegmentRefAudio:
     """Standalone reference audio for MiniMax ``<Audio N>`` (index 0-based)."""
 
     index: int
-    audio: dict  # ComfyUI AUDIO: {waveform, sample_rate}
+    audio: dict  # ComfyUI AUDIO: {waveform, sample_rate}; decoded eagerly at build
     audio_file: str = ""
+    audio_path: str = ""  # absolute input path (runtime-only; for cache fingerprint)
 
 
 @dataclass
@@ -227,6 +228,9 @@ class DirectorPlan:
     exposure_anchor_enabled: bool = True
     exposure_anchor_strength: float = 0.40  # gamma range cap [1/1+s, 1+s]; 0 = off
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
+    # Full source-video PCM, reused only during this one Director execution and
+    # freed when the run ends (replaces the old never-cleared process cache).
+    audio_decode_cache: dict = field(default_factory=dict, repr=False)
     refine: dict | None = None
     # Sampling knobs stamped at execute time (first-pass cache fingerprint).
     sample_seed: int = 0
@@ -344,8 +348,8 @@ def _load_refs(ref_list: list[dict]) -> list[SegmentRef]:
     return sorted(refs, key=lambda r: r.index)
 
 
-def load_reference_audio_item(item: dict) -> dict | None:
-    """Load one timeline refAudios entry into a ComfyUI AUDIO dict."""
+def _reference_audio_file(item: dict) -> tuple[str, str]:
+    """Return (timeline identity rel, absolute input path) for a refAudios entry."""
     rel = str(
         item.get("audioFile")
         or item.get("audio_file")
@@ -354,11 +358,20 @@ def load_reference_audio_item(item: dict) -> dict | None:
         or ""
     ).replace("\\", "/").strip()
     if not rel:
-        return None
+        return "", ""
     sub = str(item.get("subfolder") or "").replace("\\", "/").strip().strip("/")
-    if sub and not rel.startswith(sub + "/"):
-        rel = f"{sub}/{rel}"
-    file_path = os.path.join(folder_paths.get_input_directory(), rel.replace("/", os.sep))
+    located = rel
+    if sub and not located.startswith(sub + "/"):
+        located = f"{sub}/{located}"
+    file_path = os.path.join(folder_paths.get_input_directory(), located.replace("/", os.sep))
+    return rel, file_path
+
+
+def load_reference_audio_item(item: dict) -> dict | None:
+    """Load one timeline refAudios entry into a ComfyUI AUDIO dict."""
+    _rel, file_path = _reference_audio_file(item)
+    if not file_path:
+        return None
     if not os.path.isfile(file_path):
         log.warning("Reference audio missing: %s", file_path)
         return None
@@ -369,6 +382,14 @@ def load_reference_audio_item(item: dict) -> dict | None:
 
 
 def _load_ref_audios(audio_list: list[dict]) -> list[SegmentRefAudio]:
+    """Eagerly decode uploaded reference audio at plan build.
+
+    Decoding up front (instead of lazily during the generation loop) guarantees
+    the ``<Audio N>`` PCM is in memory before conditioning, and keeps a slot only
+    when decode actually succeeded — so prompt ``<Audio N>`` tags always line up
+    with a populated ref_audio slot (no tag-to-empty-slot mismatch = no silent
+    timbre drop).
+    """
     out: list[SegmentRefAudio] = []
     for item in audio_list or []:
         if not isinstance(item, dict):
@@ -376,11 +397,24 @@ def _load_ref_audios(audio_list: list[dict]) -> list[SegmentRefAudio]:
         index = int(item.get("index", item.get("slot", len(out))))
         if index < 0 or index >= MAX_REFERENCE_AUDIOS:
             continue
-        audio = load_reference_audio_item(item)
-        if audio is None:
+        rel, file_path = _reference_audio_file(item)
+        if not file_path:
             continue
-        rel = str(item.get("audioFile") or item.get("audio_file") or item.get("fileName") or "").strip()
-        out.append(SegmentRefAudio(index=index, audio=audio, audio_file=rel))
+        if not os.path.isfile(file_path):
+            log.warning("Reference audio missing: %s", file_path)
+            continue
+        audio = load_reference_audio(file_path)
+        if audio is None:
+            log.warning("Failed to decode reference audio: %s", file_path)
+            continue
+        out.append(
+            SegmentRefAudio(
+                index=index,
+                audio=audio,
+                audio_file=rel,
+                audio_path=file_path,
+            )
+        )
     return sorted(out, key=lambda a: a.index)
 
 

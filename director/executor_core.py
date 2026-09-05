@@ -267,6 +267,26 @@ def _ref_video_audios_to_dict(items) -> dict | None:
     return out or None
 
 
+def _prune_continuity_working_set(
+    next_segment_index: int,
+    av_latents: dict[int, dict],
+    refine_passes: dict[int, list[tuple[str, torch.Tensor]]],
+) -> None:
+    """Keep only the direct predecessor the next segment's continuity can read.
+
+    Continuity only ever consumes segment ``N-1`` (``prev_idx = seg.index - 1``);
+    a missing in-memory predecessor is reloaded from the on-disk segment cache.
+    Final/pre-refine frames, export audio and handoff metadata live in separate
+    collections and are intentionally left untouched.
+    """
+    current = int(next_segment_index)
+    keep = current - 1
+    for working_set in (av_latents, refine_passes):
+        for index in tuple(working_set):
+            if int(index) < current and int(index) != keep:
+                working_set.pop(index, None)
+
+
 def execute_director_plan_core(
     plan: DirectorPlan,
     *,
@@ -1260,6 +1280,11 @@ def execute_director_plan_core(
         return chunk, audio_dict, pre_chunk
 
     for seg in all_segments:
+        # Drop AV-latent / refine-pass working sets older than the immediate
+        # predecessor (continuity only reads N-1; missing entries reload from
+        # the disk segment cache). Final frames, audios and handoff meta live
+        # in separate collections and are never pruned here.
+        _prune_continuity_working_set(seg.index, completed_av_latents, completed_refine_passes)
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
                 cleanup_segment_vram(enabled=True)

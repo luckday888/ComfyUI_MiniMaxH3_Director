@@ -26,6 +26,19 @@ AUDIO_MODE_MUTE = "mute"
 VIDEO_EDIT_AUDIO_TASKS = frozenset({"v2v", "rv2v", "r2v"})
 
 
+def _execution_audio_cache(plan) -> dict[str, dict[str, Any]]:
+    """Source-video PCM cache owned by this DirectorPlan / current execution only.
+
+    Lets repeated timeline extractions within one run decode each source once,
+    while the whole dict is freed when the run ends (no cross-run leak).
+    """
+    cache = getattr(plan, "audio_decode_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(plan, "audio_decode_cache", cache)
+    return cache
+
+
 def task_passes_source_audio(task_key: str) -> bool:
     # v2v/rv2v: source-timeline extract; others may fall back after empty model audio.
     return task_key in {"i2v", "fl2v", "r2v", "v2v", "rv2v"}
@@ -128,7 +141,9 @@ def prepare_segment_audio_for_file_export(
         timeline = getattr(plan, "raw", None) or {}
         start = int(getattr(seg, "start_frame", 0) or 0)
         end = int(getattr(seg, "end_frame", start + n_frames) or (start + n_frames))
-        extracted = extract_timeline_audio(timeline, start, end, fps)
+        extracted = extract_timeline_audio(
+            timeline, start, end, fps, audio_cache=_execution_audio_cache(plan),
+        )
         if _audio_has_samples(extracted):
             sr = int(extracted.get("sample_rate") or SILENT_SAMPLE_RATE)
             return _pad_or_trim_audio_to_frames(
@@ -419,7 +434,13 @@ def build_director_audio_outputs(
                 outputs.append(empty_audio_dict(silent_sample_rate))
                 continue
             seg = plan.segments[seg_indices[i]]
-            extracted = extract_timeline_audio(timeline, seg.start_frame, seg.end_frame, fps)
+            extracted = extract_timeline_audio(
+                timeline,
+                seg.start_frame,
+                seg.end_frame,
+                fps,
+                audio_cache=_execution_audio_cache(plan),
+            )
             if mode == AUDIO_MODE_SOURCE and not _audio_has_samples(extracted):
                 extracted = _ref_audio_for_segment(seg) or extracted
             if mode == AUDIO_MODE_SOURCE and not _audio_has_samples(extracted):
@@ -446,7 +467,13 @@ def build_director_audio_outputs(
     end = max(0, int(output_frame_end if output_frame_end is not None else plan.total_frames))
     if images_out and hasattr(images_out[0], "shape"):
         end = max(end, int(images_out[0].shape[0]))
-    extracted = extract_timeline_audio(timeline, 0, end, fps) if end > 0 else None
+    extracted = (
+        extract_timeline_audio(
+            timeline, 0, end, fps, audio_cache=_execution_audio_cache(plan),
+        )
+        if end > 0
+        else None
+    )
     if mode == AUDIO_MODE_SOURCE and not _audio_has_samples(extracted):
         # Multi-segment source: use each segment's own reference audio, joined
         # along the timeline (segments without a ref audio become silence).

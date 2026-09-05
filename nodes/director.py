@@ -248,8 +248,17 @@ class MiniMaxH3Director:
             refine=refine,
         )
 
-        combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
-            execute_director_plan_core(
+        try:
+            (
+                combined,
+                segment_outputs,
+                segment_audios,
+                report,
+                export_frame_counts,
+                pre_combined,
+                pre_segments,
+                held_for_confirmation,
+            ) = execute_director_plan_core(
                 plan,
                 node_id=unique_id,
                 model=model,
@@ -266,17 +275,22 @@ class MiniMaxH3Director:
                 shift_audio=shift_audio,
                 clear_vram_between_segments=clear_vram_between_segments,
             )
-        )
 
-        return finalize_director_outputs(
-            plan,
-            combined,
-            segment_outputs,
-            report,
-            export_source_images=export_source_images,
-            segment_audios=segment_audios,
-            segment_frame_counts=export_frame_counts,
-            pre_refine_combined=pre_combined,
-            pre_refine_segments=pre_segments,
-            block_final_images=held_for_confirmation,
-        )
+            return finalize_director_outputs(
+                plan,
+                combined,
+                segment_outputs,
+                report,
+                export_source_images=export_source_images,
+                segment_audios=segment_audios,
+                segment_frame_counts=export_frame_counts,
+                pre_refine_combined=pre_combined,
+                pre_refine_segments=pre_segments,
+                block_final_images=held_for_confirmation,
+            )
+        finally:
+            # Free the run-scoped source-audio PCM cache (replaces the old
+            # never-cleared process-level cache).
+            cache = getattr(plan, "audio_decode_cache", None)
+            if isinstance(cache, dict):
+                cache.clear()
