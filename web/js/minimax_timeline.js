@@ -11543,7 +11543,7 @@ class MiniMaxH3DirectorEditor {
         if (this.isImageBatch?.()) return false;
         const audioMode = normalizeAudioMode(this.timeline?.output?.audioMode);
         return audioMode !== "mute" && audioMode !== "source";
-    },
+    }
 
     toggleLiveAudioPreview() {
         this.timeline.liveAudioPreview = !this.isLiveAudioPreviewEnabled();
@@ -11552,7 +11552,7 @@ class MiniMaxH3DirectorEditor {
         this.scheduleTimelineSync();
         this.updateDomWidgetHeight?.();
         syncDirectorNodeSize(this.node, this);
-    },
+    }
 
     refreshLiveAudioPreviewButton() {
         const btn = this.root?.querySelector('[data-a="live-audio-preview"]');
@@ -11569,11 +11569,11 @@ class MiniMaxH3DirectorEditor {
                 : t("tooltip.liveAudioPreviewOff");
         btn.setAttribute("data-i18n", "toolbar.liveAudioPreview");
         btn.removeAttribute("data-i18n-title");
-    },
+    }
 
     needsLiveAudioBar() {
         return this.isLiveAudioPreviewEnabled() && this.canPreviewAudio();
-    },
+    }
 
     updateLiveAudioBar() {
         const bar = this.liveAudioEl;
@@ -11588,7 +11588,7 @@ class MiniMaxH3DirectorEditor {
             if (this.liveAudioMeta) this.liveAudioMeta.textContent = t("liveSample.audioIdle");
             if (this.liveAudioStep) this.liveAudioStep.textContent = "";
         }
-    },
+    }
 
     clearLiveSampleAudio() {
         this._liveAudioB64 = "";
@@ -11603,7 +11603,7 @@ class MiniMaxH3DirectorEditor {
         if (this.liveAudioMeta && this.needsLiveAudioBar()) {
             this.liveAudioMeta.textContent = t("liveSample.audioIdle");
         }
-    },
+    }
 
     /** Manual-listen audio preview: update the <audio> src, never autoplay. */
     setLiveSampleAudio(detail = {}) {
