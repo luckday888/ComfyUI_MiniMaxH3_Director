@@ -473,7 +473,7 @@ def execute_director_plan_core(
     else:
         reports.append("Live preview: OFF — 跳过 TAE 与成片 JPEG（节点内不播放）。")
     if live_audio_preview:
-        reports.append("Live audio preview: ON — 采样后期解码当前步音频，供节点内手动试听。")
+        reports.append("Live audio preview: ON — 采样自首步起解码当前步音频（早期偏噪），供节点内手动试听、及早止损。")
     if clear_vram_between_segments:
         reports.append("VRAM: 段间清理显存已开启（最后一段不清理）。")
     if audio_mode == AUDIO_MODE_MUTE:

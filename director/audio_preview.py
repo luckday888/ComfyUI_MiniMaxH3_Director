@@ -1,16 +1,20 @@
-"""Lightweight in-sampling audio preview for MiniMax H3 (fl2va joint diffusion).
+"""In-sampling audio preview for MiniMax H3 (fl2va joint diffusion).
 
 The per-step sampler callback receives ``x0`` (the predicted clean AV latent),
 which is a NestedTensor whose last stream is the audio latent — the same stream
 ``VAEDecodeAudio`` decodes for the final clip. This module decodes that stream
 with the official audio VAE and encodes a PCM16 WAV (base64) so the UI can offer
-a manual "listen to the current step" preview during the late denoising steps.
+a manual "listen to the current step" preview, starting from the first step.
 
 Design notes:
 - There is no tiny audio decoder analogous to the video TAE; we must run the full
-  fp32 audio VAE, so callers decode sparingly (late steps only, throttled).
-- Early-step audio is noise (and the official decode applies a std*5 gain), so we
-  only decode in the last ~30% of steps.
+  fp32 audio VAE, so decoding is throttled (first/last step always, plus an
+  adaptive stride in between) to avoid slowing sampling.
+- Early-step audio is not yet converged and sounds noisy (the same way early video
+  frames are blurry), but is enough to judge "any sound / voice vs music / energy
+  contour" so a bad run can be aborted early. Decoding MUST go through the same
+  ``VAEDecodeAudio`` node path as the final clip, or the audio stream is not
+  unbounded correctly and the result is full-scale white noise.
 - Everything here is best-effort: any failure returns None and never breaks sampling.
 """
 
@@ -26,27 +30,50 @@ import torch
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.audio_preview")
 
-# Only decode in the late denoising phase (early audio is amplified white noise)
-# and at most every N steps plus the final step.
-LATE_STEP_FRAC = 0.7
-PREVIEW_EVERY = 3
+# 自适应预览步距：首步与末步必发；中间步距随总步数缩放。
+# 少步快速迭代（如 6 步）几乎每步都推，便于采样前期就试听、发现音频不对立即停掉重开；
+# 长任务按约 15% 步距稀疏推，控制 fp32 音频 VAE 的反复解码开销。
+def _preview_stride(total: int) -> int:
+    return max(1, int(round(total * 0.15)))
 
 
 def should_emit_audio_preview(step: int, total_steps: int) -> bool:
-    """Late-phase throttle: true on a sparse subset of steps near the end."""
+    """首步、末步必发；中间按自适应步距发射。
+
+    早期步骤音频尚未收敛、偏噪（扩散本质，画面预览早期同样是糊的），但足以
+    判断「有无声音 / 人声还是音乐 / 能量轮廓」，供少步快速迭代时及早止损。
+    """
     try:
         total = max(1, int(total_steps))
         s = int(step)
-        start = int(total * LATE_STEP_FRAC)
-        if s < start:
-            return False
         last = total - 1
-        return s % max(1, PREVIEW_EVERY) == 0 or s >= last
+        if s <= 0 or s >= last:
+            return True
+        return s % _preview_stride(total) == 0
     except Exception:
         return False
 
 
+def _import_vaedecodeaudio_node():
+    """成片同款节点类（VAEDecodeAudio.execute），与 executor_core._decode_av_latent
+    走完全一致的解码路径。优先用它——它在各 ComfyUI 版本下都能正确 unbind AV
+    NestedTensor 的音频 stream、跑 audio VAE 并做官方响度归一化。"""
+    try:
+        from comfy_extras.nodes_audio import VAEDecodeAudio
+
+        return VAEDecodeAudio
+    except ImportError:  # older ComfyUI layouts
+        try:
+            from comfy_extras.nodes_lt import VAEDecodeAudio  # type: ignore
+
+            return VAEDecodeAudio
+        except Exception:
+            return None
+
+
 def _import_vae_decode_audio():
+    """旧版/兜底用的函数式入口。注意：不同 ComfyUI 版本下该函数对 AV NestedTensor
+    的处理可能与节点类不一致，仅作为节点类不可用时的后备。"""
     try:
         from comfy_extras.nodes_audio import vae_decode_audio
 
@@ -63,23 +90,46 @@ def _import_vae_decode_audio():
 def decode_preview_audio_dict(x0: Any, audio_vae: Any) -> dict | None:
     """Decode the current-step AV latent ``x0`` to a ComfyUI AUDIO dict.
 
-    Mirrors the final decode path: ``vae_decode_audio`` unbinds the last nested
-    stream (audio), runs ``vae.decode`` and normalizes loudness.
+    必须与成片解码同路径：VAEDecodeAudio 节点会 unbind NestedTensor 最后一个
+    stream（音频），再 ``vae.decode`` + 官方响度归一化。早期实现直调函数式
+    ``vae_decode_audio``，在部分版本下未正确取音频 stream，解出整段白噪。
     """
     if audio_vae is None or x0 is None:
         return None
-    fn = _import_vae_decode_audio()
-    if fn is None:
+    audio = None
+    node_cls = _import_vaedecodeaudio_node()
+    if node_cls is not None:
+        try:
+            out = node_cls.execute(audio_vae, {"samples": x0})
+            # 节点返回 (AUDIO dict,)；兼容直接返回 dict 的版本。
+            audio = out[0] if isinstance(out, (tuple, list)) else out
+        except Exception as exc:
+            log.debug("VAEDecodeAudio.execute preview path failed: %s", exc)
+    if not isinstance(audio, dict):
+        fn = _import_vae_decode_audio()
+        if fn is not None:
+            try:
+                audio = fn(audio_vae, {"samples": x0})
+            except Exception as exc:
+                log.debug("Audio preview decode skipped: %s", exc)
+    waveform = audio.get("waveform") if isinstance(audio, dict) else None
+    if not isinstance(waveform, torch.Tensor) or waveform.numel() <= 0:
         return None
+    sr = int(audio.get("sample_rate") or 32000)
+    # 诊断统计：peak≈1 满幅 + std 偏大 ≈ 爆白噪；std 适中、peak<1 ≈ 正常音频；
+    # 全 0 ≈ 静音。用于快速判断预览解码是否正确、从第几步起音频收敛。
     try:
-        audio = fn(audio_vae, {"samples": x0})
-        wave = audio.get("waveform") if isinstance(audio, dict) else None
-        if not isinstance(wave, torch.Tensor) or wave.numel() <= 0:
-            return None
-        return {"waveform": wave, "sample_rate": int(audio.get("sample_rate") or 32000)}
-    except Exception as exc:
-        log.debug("Audio preview decode skipped: %s", exc)
-        return None
+        w = waveform.detach().float()
+        log.info(
+            "音频预览解码: sr=%d 时长=%.2fs std=%.4f peak=%.4f",
+            sr,
+            w.shape[-1] / float(max(1, sr)),
+            w.std().item(),
+            w.abs().max().item(),
+        )
+    except Exception:
+        pass
+    return {"waveform": waveform, "sample_rate": sr}
 
 
 def _waveform_to_wav_b64(audio: dict) -> tuple[str, int] | None:
