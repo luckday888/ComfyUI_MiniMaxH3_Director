@@ -652,6 +652,7 @@ def build_gen_director_plan(
     src_w, src_h = _resolve_gen_image_source_dims(segment_ranges, global_block, output_block)
 
     from .segment_continuity import (
+        resolve_audio_continuity_enabled,
         resolve_continuity_settings,
         resolve_exposure_anchor_enabled,
         resolve_exposure_anchor_strength,
@@ -660,6 +661,7 @@ def build_gen_director_plan(
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
+    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
     exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
 
@@ -685,6 +687,7 @@ def build_gen_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
+        audio_continuity_enabled=audio_continuity_enabled,
         exposure_anchor_enabled=exposure_anchor_enabled,
         exposure_anchor_strength=exposure_anchor_strength,
     )

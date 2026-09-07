@@ -734,6 +734,7 @@ def build_fl2v_director_plan(
     raw["totalFrames"] = timeline_total
 
     from .segment_continuity import (
+        resolve_audio_continuity_enabled,
         resolve_continuity_settings,
         resolve_exposure_anchor_enabled,
         resolve_exposure_anchor_strength,
@@ -742,6 +743,7 @@ def build_fl2v_director_plan(
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
+    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
     exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     run_indices = (
@@ -769,6 +771,7 @@ def build_fl2v_director_plan(
         run_indices=run_indices,
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
+        audio_continuity_enabled=audio_continuity_enabled,
         exposure_anchor_enabled=exposure_anchor_enabled,
         exposure_anchor_strength=exposure_anchor_strength,
     )

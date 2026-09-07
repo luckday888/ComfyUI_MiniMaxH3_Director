@@ -218,10 +218,13 @@ class DirectorPlan:
     raw: dict
     source_total_frames: int = 0
     export_max_frames: int = 0
-    export_mode: str = "all"  # "all" | "segments"
+    export_mode: str = "all"  # "all" | "segments" | "selection"
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
+    # Audio handoff across the seam: when False, each segment keeps its own audio
+    # (hard cut) even while video motion-context still stitches. Default True.
+    audio_continuity_enabled: bool = True
     # Segment-continuity companion: open-loop pixel-only exposure anchor that
     # flattens per-segment brightness drift back to the first segment's exposure.
     # Never feeds latents/audio, so the native latent pin is unaffected.
@@ -244,6 +247,10 @@ class DirectorPlan:
     sample_shift_audio: float = 3.0
     # Set during execute when export_mode=segments (minimax_seg_export folder).
     segment_mp4_run_dir: str | None = None
+    # Set during execute when export_mode=selection: list of consecutive run-groups,
+    # each a list of positions into the run-order (run_list) segment list. One
+    # merged clip is emitted per group. Consumed by the audio-output builder.
+    selection_export_groups: list | None = None
 
     @property
     def segment_count(self) -> int:
@@ -557,6 +564,8 @@ def _resolve_export_mode(output_block: dict) -> str:
     mode = str(output_block.get("exportMode") or output_block.get("export_mode") or "all").lower()
     if mode in ("segments", "segment", "per_segment", "by_segment"):
         return "segments"
+    if mode in ("selection", "selected", "select", "merge_selection", "by_selection"):
+        return "selection"
     return "all"
 
 
@@ -820,6 +829,7 @@ def build_director_plan(
         )
 
     from .segment_continuity import (
+        resolve_audio_continuity_enabled,
         resolve_continuity_settings,
         resolve_exposure_anchor_enabled,
         resolve_exposure_anchor_strength,
@@ -829,6 +839,7 @@ def build_director_plan(
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
+    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
     exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     for seg, (_start, _end, seg_data) in zip(segments, segment_ranges):
@@ -864,6 +875,7 @@ def build_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
+        audio_continuity_enabled=audio_continuity_enabled,
         exposure_anchor_enabled=exposure_anchor_enabled,
         exposure_anchor_strength=exposure_anchor_strength,
         global_ref_audios=global_ref_audios,
