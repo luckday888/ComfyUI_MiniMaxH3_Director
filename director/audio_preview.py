@@ -12,9 +12,16 @@ Design notes:
   adaptive stride in between) to avoid slowing sampling.
 - Early-step audio is not yet converged and sounds noisy (the same way early video
   frames are blurry), but is enough to judge "any sound / voice vs music / energy
-  contour" so a bad run can be aborted early. Decoding MUST go through the same
-  ``VAEDecodeAudio`` node path as the final clip, or the audio stream is not
-  unbounded correctly and the result is full-scale white noise.
+  contour" so a bad run can be aborted early.
+- The caller MUST pass ``x0`` through ``inner_model.process_latent_out()`` before
+  calling us: during sampling the audio stream is carried scaled by ``audio_scale``
+  in model space and is only divided back to VAE space at the end of sampling
+  (see comfy/samplers.py / comfy/model_base.py). Decoding the raw model-space
+  stream yields audio that is ~audio_scale times too loud, clipped, and does not
+  match the final clip. (The video TAE preview is unaffected — it consumes
+  model-space latent directly.)
+- Decoding goes through the same ``VAEDecodeAudio`` node path as the final clip so
+  the AV NestedTensor audio stream is unbound correctly.
 - Everything here is best-effort: any failure returns None and never breaks sampling.
 """
 
@@ -29,6 +36,7 @@ from typing import Any
 import torch
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.audio_preview")
+
 
 # 自适应预览步距：首步与末步必发；中间步距随总步数缩放。
 # 少步快速迭代（如 6 步）几乎每步都推，便于采样前期就试听、发现音频不对立即停掉重开；
@@ -90,9 +98,9 @@ def _import_vae_decode_audio():
 def decode_preview_audio_dict(x0: Any, audio_vae: Any) -> dict | None:
     """Decode the current-step AV latent ``x0`` to a ComfyUI AUDIO dict.
 
-    必须与成片解码同路径：VAEDecodeAudio 节点会 unbind NestedTensor 最后一个
-    stream（音频），再 ``vae.decode`` + 官方响度归一化。早期实现直调函数式
-    ``vae_decode_audio``，在部分版本下未正确取音频 stream，解出整段白噪。
+    ``x0`` 必须已经过 ``process_latent_out`` 除回 VAE 空间（见模块 docstring）。
+    解码与成片同路径：VAEDecodeAudio 节点会 unbind NestedTensor 最后一个
+    stream（音频），再 ``vae.decode`` + 官方响度归一化。
     """
     if audio_vae is None or x0 is None:
         return None
@@ -116,19 +124,6 @@ def decode_preview_audio_dict(x0: Any, audio_vae: Any) -> dict | None:
     if not isinstance(waveform, torch.Tensor) or waveform.numel() <= 0:
         return None
     sr = int(audio.get("sample_rate") or 32000)
-    # 诊断统计：peak≈1 满幅 + std 偏大 ≈ 爆白噪；std 适中、peak<1 ≈ 正常音频；
-    # 全 0 ≈ 静音。用于快速判断预览解码是否正确、从第几步起音频收敛。
-    try:
-        w = waveform.detach().float()
-        log.info(
-            "音频预览解码: sr=%d 时长=%.2fs std=%.4f peak=%.4f",
-            sr,
-            w.shape[-1] / float(max(1, sr)),
-            w.std().item(),
-            w.abs().max().item(),
-        )
-    except Exception:
-        pass
     return {"waveform": waveform, "sample_rate": sr}
 
 
@@ -167,7 +162,7 @@ def _waveform_to_wav_b64(audio: dict) -> tuple[str, int] | None:
 
 
 def x0_to_audio_preview_b64(x0: Any, audio_vae: Any) -> tuple[str, int] | None:
-    """Full path: current-step ``x0`` -> (WAV base64, sample_rate), or None."""
+    """Full path: current-step ``x0`` (VAE-space) -> (WAV base64, sample_rate)."""
     audio = decode_preview_audio_dict(x0, audio_vae)
     if audio is None:
         return None

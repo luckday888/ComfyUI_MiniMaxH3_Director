@@ -1039,7 +1039,8 @@ def execute_director_plan_core(
                     log.debug("Live TAE preview skipped: %s", exc)
 
             # Live audio: decode the current-step audio stream to a WAV preview.
-            # Throttled to late denoising steps (early audio is amplified noise);
+            # Emitted from the first step (early audio is not yet converged but
+            # enough to judge voice-vs-music / energy contour and abort early);
             # the UI plays it manually (no autoplay).
             if live_audio_preview:
                 try:
@@ -1049,7 +1050,20 @@ def execute_director_plan_core(
                     )
 
                     if should_emit_audio_preview(step, total_steps):
-                        preview = x0_to_audio_preview_b64(x0, audio_vae)
+                        # 回调里的 x0 是「模型空间」预测：采样时 H3 把音频 stream 放大
+                        # audio_scale 倍挂到视频调度上，采样结束才在
+                        # inner_model.process_latent_out() 里除回 VAE 空间（成片路径，
+                        # 见 comfy/samplers.py）。音频 VAE 必须吃缩放后的 latent，
+                        # 否则解出的预览电平虚高约 audio_scale 倍、削波失真、且与成片
+                        # 内容对不上（视频 TAE 预览本身就吃模型空间 latent，故不受影响）。
+                        x0_audio = x0
+                        try:
+                            inner = getattr(model, "model", None)
+                            if callable(getattr(inner, "process_latent_out", None)):
+                                x0_audio = inner.process_latent_out(x0.to(torch.float32))
+                        except Exception as exc:
+                            log.debug("Audio preview process_latent_out skipped: %s", exc)
+                        preview = x0_to_audio_preview_b64(x0_audio, audio_vae)
                         if preview is not None:
                             b64, sr = preview
                             report_director_audio_preview(
