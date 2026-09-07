@@ -11537,10 +11537,13 @@ class MiniMaxH3DirectorEditor {
         return this.timeline?.liveAudioPreview === true;
     }
 
-    /** Audio preview only makes sense for model-generated audio (not mute/source)
-     *  on the single-timeline editor (not the image-batch group cards). */
+    /** 音频预览仅对模型生成音频（非静音/原声）有意义；且需在有统一试听槽的编辑器上。
+     *  注意：isImageBatch() 对 r2v/t2v/i2v/mixed 等视频批量任务也返回 true（它们的
+     *  director 模式是 prompt_batch），但这些任务在主时间线上有 duration groups
+     *  （usesBatchTimeline() 为真），与单轨编辑器共用同一套主试听面板，应当支持。
+     *  真正要排除的是纯图片组卡片（isImageBatch() 且 !usesBatchTimeline()）。 */
     canPreviewAudio() {
-        if (this.isImageBatch?.()) return false;
+        if (this.isImageBatch?.() && !this.usesBatchTimeline?.()) return false;
         const audioMode = normalizeAudioMode(this.timeline?.output?.audioMode);
         return audioMode !== "mute" && audioMode !== "source";
     }
