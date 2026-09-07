@@ -1997,6 +1997,8 @@ function parseTimeline(raw, totalFrames, fps) {
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
             exposureAnchorEnabled: data.output?.exposureAnchorEnabled ?? data.output?.exposure_anchor_enabled,
             exposureAnchorStrength: data.output?.exposureAnchorStrength ?? data.output?.exposure_anchor_strength,
+            // 音频接续开关：此前漏读，刷新/重载后被回落为默认开启，导致用户取消勾选后再次自动勾选
+            audioContinuityEnabled: data.output?.audioContinuityEnabled ?? data.output?.audio_continuity_enabled,
             continuityMode: data.output?.continuityMode ?? data.output?.continuity_mode,
             continuityRedraw: data.output?.continuityRedraw ?? data.output?.continuity_redraw,
         });
@@ -6824,6 +6826,11 @@ class MiniMaxH3DirectorEditor {
         } else {
             // Normalize stored flag without clearing preference while ineligible.
             this.timeline.output.continuityEnabled = isContinuityEnabled(this.timeline.output);
+        }
+        // 音频接续配套开关：与总开关一致，合格时从 DOM 回读用户选择；不合格时保留已存偏好
+        // （缺失默认开启）。此前缺少这段回读，output 一旦按默认值重建就会丢掉用户的取消勾选。
+        if (continuityEligible && this.audioContinuityCb) {
+            this.timeline.output.audioContinuityEnabled = !!this.audioContinuityCb.checked;
         }
         if (continuityEligible && this.segmentContinuityOverlap) {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
