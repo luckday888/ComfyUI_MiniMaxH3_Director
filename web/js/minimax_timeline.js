@@ -216,6 +216,29 @@ function normalizeAudioMode(value) {
 const CONTINUITY_FRAME_CHOICES = [5, 22, 39, 56];
 /** Official Motion Context baseline recommendation. */
 const DEFAULT_CONTINUITY_FRAMES = 22;
+const DEFAULT_CONTINUITY_MODE = "guide";
+const DEFAULT_CONTINUITY_REDRAW = 0.65;
+const MIN_CONTINUITY_REDRAW = 0.40;
+const MAX_CONTINUITY_REDRAW = 0.95;
+
+function normalizeContinuityMode(raw) {
+    const s = String(raw ?? "").trim().toLowerCase();
+    if (
+        s === "continue"
+        || s === "continuation"
+        || s === "latent"
+        || s === "guide_redraw"
+        || s === "guide+redraw"
+        || s === "redraw"
+    ) return "continue";
+    return DEFAULT_CONTINUITY_MODE;
+}
+
+function snapContinuityRedraw(raw) {
+    const n = parseFloat(raw);
+    const value = Number.isFinite(n) ? n : DEFAULT_CONTINUITY_REDRAW;
+    return Math.round(Math.min(MAX_CONTINUITY_REDRAW, Math.max(MIN_CONTINUITY_REDRAW, value)) * 100) / 100;
+}
 const CONTINUITY_TASKS = new Set(["t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v", "mixed"]);
 
 function isVideoEditTaskKey(taskKey) {
@@ -246,6 +269,10 @@ function normalizeOutputContinuity(output = {}) {
         exposureAnchorEnabled: isExposureAnchorEnabled(output),
         exposureAnchorStrength: getExposureAnchorStrength(output),
         audioContinuityEnabled: isAudioContinuityEnabled(output),
+        continuityMode: normalizeContinuityMode(output.continuityMode ?? output.continuity_mode),
+        continuityRedraw: snapContinuityRedraw(
+            output.continuityRedraw ?? output.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
+        ),
         audioMode: normalizeAudioMode(output.audioMode ?? output.audio_mode),
         refImageSize: normalizeRefImageSize(output.refImageSize ?? output.ref_image_size),
     };
@@ -1886,6 +1913,8 @@ function parseTimeline(raw, totalFrames, fps) {
             exportSourceImages: false,
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
         },
         runSelectEnabled: false,
         runSelection: [],
@@ -1954,6 +1983,8 @@ function parseTimeline(raw, totalFrames, fps) {
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
             exposureAnchorEnabled: data.output?.exposureAnchorEnabled ?? data.output?.exposure_anchor_enabled,
             exposureAnchorStrength: data.output?.exposureAnchorStrength ?? data.output?.exposure_anchor_strength,
+            continuityMode: data.output?.continuityMode ?? data.output?.continuity_mode,
+            continuityRedraw: data.output?.continuityRedraw ?? data.output?.continuity_redraw,
         });
         // Infer aspectRatio from saved width/height when older payloads omitted the label.
         if (!data.output.aspectRatio && data.output.width > 0 && data.output.height > 0) {
@@ -2346,6 +2377,7 @@ class MiniMaxH3DirectorEditor {
                 }
                 return newBatchSegment({
                     ...(matched?.id ? { id: matched.id } : {}),
+                    frameRate: this.getFrameRate(),
                     durationSec: spec.durationSec ?? defaultDurationSec(taskKey),
                     prompt,
                     negativePrompt: matched?.negativePrompt ?? "",
@@ -2901,6 +2933,17 @@ class MiniMaxH3DirectorEditor {
                     <input type="range" data-r="exposure-anchor-strength" min="0" max="60" step="1" value="40" style="width:64px">
                     <span class="bd-meta" data-r="exposure-anchor-strength-val">40%</span>
                 </span>
+                <span data-r="segment-continuity-mode-wrap" hidden>
+                    <span class="bd-meta" data-i18n="output.continuityMode">引导方式</span>
+                    <select class="bd-num" data-r="segment-continuity-mode" style="width:96px" data-i18n-title="tooltip.continuityMode">
+                        <option value="guide" data-i18n="output.continuityMode.guide">引导</option>
+                        <option value="continue" data-i18n="output.continuityMode.continue">引导+重绘</option>
+                    </select>
+                    <span data-r="segment-continuity-redraw-wrap" hidden>
+                        <span class="bd-meta" data-i18n="output.continuityRedraw">重绘幅度</span>
+                        <input type="number" class="bd-num" data-r="segment-continuity-redraw" min="0.40" max="0.95" step="0.05" value="0.65" style="width:56px" data-i18n-title="tooltip.continuityRedraw">
+                    </span>
+                </span>
             </span>
             <button type="button" class="bd-btn bd-btn-live-preview" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
@@ -3211,6 +3254,10 @@ class MiniMaxH3DirectorEditor {
         this.exposureAnchorCb = this.root.querySelector('[data-r="exposure-anchor-cb"]');
         this.exposureAnchorStrength = this.root.querySelector('[data-r="exposure-anchor-strength"]');
         this.exposureAnchorStrengthVal = this.root.querySelector('[data-r="exposure-anchor-strength-val"]');
+        this.segmentContinuityModeWrap = this.root.querySelector('[data-r="segment-continuity-mode-wrap"]');
+        this.segmentContinuityMode = this.root.querySelector('[data-r="segment-continuity-mode"]');
+        this.segmentContinuityRedrawWrap = this.root.querySelector('[data-r="segment-continuity-redraw-wrap"]');
+        this.segmentContinuityRedraw = this.root.querySelector('[data-r="segment-continuity-redraw"]');
         this.outPreview = this.root.querySelector('[data-r="out-preview"]');
         this.runStatusEl = this.root.querySelector('[data-r="run-status"]');
         this.runTitleEl = this.root.querySelector('[data-r="run-title"]');
@@ -3537,6 +3584,22 @@ class MiniMaxH3DirectorEditor {
             };
             this.exposureAnchorStrength.addEventListener("keydown", (e) => e.stopPropagation());
             this.exposureAnchorStrength.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.segmentContinuityMode) {
+            this.segmentContinuityMode.onchange = () => {
+                this.onOutputField("continuityMode", this.segmentContinuityMode.value);
+                this.updateSegmentContinuityUI();
+            };
+            this.segmentContinuityMode.addEventListener("keydown", (e) => e.stopPropagation());
+        }
+        if (this.segmentContinuityRedraw) {
+            const applyRedraw = () => this.onOutputField(
+                "continuityRedraw",
+                snapContinuityRedraw(this.segmentContinuityRedraw.value),
+            );
+            this.segmentContinuityRedraw.onchange = applyRedraw;
+            this.segmentContinuityRedraw.addEventListener("keydown", (e) => e.stopPropagation());
+            this.segmentContinuityRedraw.addEventListener("keyup", (e) => e.stopPropagation());
         }
         if (this.segContinuityFromPrevCb) {
             this.segContinuityFromPrevCb.onchange = () => {
@@ -4444,6 +4507,7 @@ class MiniMaxH3DirectorEditor {
     _resetBatchWorkspaceLive(taskKey) {
         const key = resolveTaskKey(taskKey || this.getTaskKey());
         this.timeline.segments = [newBatchSegment({
+            frameRate: this.getFrameRate(),
             durationSec: defaultDurationSec(key === "mixed" ? "t2v" : key),
             ...(key === "mixed" ? { taskType: "t2v" } : {}),
         })];
@@ -4523,7 +4587,7 @@ class MiniMaxH3DirectorEditor {
     ensureGenTimeline() {
         const key = this.getTaskKey();
         this.timeline.gen = this.timeline.gen || {};
-        const defFc = defaultFrameCount(key);
+        const defFc = defaultFrameCount(key, this.getFrameRate());
         if (!this.timeline.segments?.length || !sumFrameCounts(this.timeline.segments)) {
             this.timeline.segments = [{
                 id: uid(), start: 0, length: defFc, frameCount: defFc,
@@ -4549,7 +4613,7 @@ class MiniMaxH3DirectorEditor {
         let start = 0;
         const fixed = [];
         for (const seg of [...this.timeline.segments]) {
-            let fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defaultFrameCount(key), minFc, MAX_GEN_FRAMES);
+            let fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defaultFrameCount(key, this.getFrameRate()), minFc, MAX_GEN_FRAMES);
             fixed.push({
                 ...seg,
                 start,
@@ -4561,7 +4625,7 @@ class MiniMaxH3DirectorEditor {
             start += fc;
         }
         if (!fixed.length) {
-            const fc = defaultFrameCount(key);
+            const fc = defaultFrameCount(key, this.getFrameRate());
             fixed.push({
                 id: uid(), start: 0, length: fc, frameCount: fc,
                 prompt: "", taskType: "", refs: [], genImage: { imageFile: "" },
@@ -4792,7 +4856,7 @@ class MiniMaxH3DirectorEditor {
                     this._clearLiveRunSelection();
                 }
                 const key = this.getTaskKey();
-                const defFc = defaultFrameCount(key);
+                const defFc = defaultFrameCount(key, this.getFrameRate());
                 const keepPrompt = this.timeline.global?.prompt || "";
                 this.timeline.segments = [{
                     id: uid(),
@@ -5210,6 +5274,9 @@ class MiniMaxH3DirectorEditor {
         if (this.timeline.segments.length === 1) {
             this.timeline.segments[0].frameCount = fc;
             this.timeline.segments[0].length = fc;
+            if (isVideoBatchTask(this.getTaskKey())) {
+                this.timeline.segments[0].durationSec = preferredDurationSecFromFrames(fc, this.getFrameRate());
+            }
         }
         this.commit();
     }
@@ -5219,6 +5286,9 @@ class MiniMaxH3DirectorEditor {
         if (!seg) return;
         const minFc = minFrameCount(this.getTaskKey());
         seg.frameCount = clamp(parseInt(this.genSegFc?.value, 10) || minFc, minFc, MAX_GEN_FRAMES);
+        if (isVideoBatchTask(this.getTaskKey())) {
+            seg.durationSec = preferredDurationSecFromFrames(seg.frameCount, this.getFrameRate());
+        }
         if (this.genSegFc) this.genSegFc.value = seg.frameCount;
         this.commit();
     }
@@ -5307,19 +5377,19 @@ class MiniMaxH3DirectorEditor {
                     const resolved = this._previewSegments
                         ? {
                             frames: fc,
-                            durationSec: preferredDurationSecFromFrames(fc, 24),
+                            durationSec: preferredDurationSecFromFrames(fc, this.getFrameRate()),
                         }
                         : durationToClampedMiniMaxFrames(
                             Number.isFinite(raw)
                                 ? raw
-                                : preferredDurationSecFromFrames(fc || defaultFrameCount(key), 24),
-                            24,
+                                : preferredDurationSecFromFrames(fc || defaultFrameCount(key, this.getFrameRate()), this.getFrameRate()),
+                            this.getFrameRate(),
                         );
                     sec += resolved.durationSec;
                     total += resolved.frames;
                 }
                 sec = roundDurationSec(sec);
-                const play = framesToDurationSec(total, 24);
+                const play = framesToDurationSec(total, this.getFrameRate());
                 this.videoNameEl.textContent = total
                     ? t("videoName.batchVideo", {
                         key,
@@ -5781,8 +5851,29 @@ class MiniMaxH3DirectorEditor {
         return map;
     }
 
+    _rescaleBatchTimelineForFrameRate(oldFps, newFps) {
+        if (this.isFl2vMode()) {
+            syncFl2vFromShots(this);
+            return;
+        }
+        if (!isVideoBatchTask(this.getTaskKey?.())) return;
+        for (const seg of this.timeline.segments || []) {
+            const frameCount = parseInt(seg.frameCount ?? seg.length, 10) || 0;
+            if (!(Number.isFinite(Number(seg.durationSec)) && Number(seg.durationSec) > 0) && frameCount > 0) {
+                seg.durationSec = preferredDurationSecFromFrames(frameCount, oldFps);
+            }
+        }
+        normalizeImageBatchSegments(this);
+        if (this.totalFramesWidget) {
+            this.totalFramesWidget.value = sumFrameCounts(this.timeline.segments);
+        }
+    }
+
     _resampleTimelineForFrameRate(oldFps, newFps) {
-        if (this.isImageBatch() || this.isGenMode() || !this.hasVideo()) return;
+        if (this.isFl2vMode() || this.isImageBatch() || this.isGenMode() || !this.hasVideo()) {
+            this._rescaleBatchTimelineForFrameRate(oldFps, newFps);
+            return;
+        }
         const oldTotal = this.getTotalFrames();
         const newTotal = this._timelineFrameCountAtFps(newFps, oldFps, oldTotal);
         const hasExplicitMap = this.getFrameMap().length > 0;
@@ -5841,11 +5932,11 @@ class MiniMaxH3DirectorEditor {
                 const fc = Math.max(0, parseInt(seg.frameCount ?? seg.length, 10) || 0);
                 const raw = Number(seg.durationSec);
                 if (dragging) {
-                    sec += preferredDurationSecFromFrames(fc, 24);
+                    sec += preferredDurationSecFromFrames(fc, this.getFrameRate());
                 } else if (Number.isFinite(raw) && raw > 0) {
                     sec += raw;
                 } else if (fc > 0) {
-                    sec += preferredDurationSecFromFrames(fc, 24);
+                    sec += preferredDurationSecFromFrames(fc, this.getFrameRate());
                 }
             }
             return Math.max(0.001, roundDurationSec(sec));
@@ -6085,6 +6176,8 @@ class MiniMaxH3DirectorEditor {
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
             audioContinuityEnabled: true,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
         };
         // Prefer ResolutionSelector fields; backfill from width/height when missing.
         // Custom keeps explicit width/height and does not recompute from megapixels.
@@ -6144,6 +6237,14 @@ class MiniMaxH3DirectorEditor {
             this.exposureAnchorStrength.value = String(s);
             if (this.exposureAnchorStrengthVal) this.exposureAnchorStrengthVal.textContent = `${s}%`;
         }
+        if (this.segmentContinuityMode) {
+            this.segmentContinuityMode.value = normalizeContinuityMode(out.continuityMode);
+        }
+        if (this.segmentContinuityRedraw) {
+            this.segmentContinuityRedraw.value = String(
+                snapContinuityRedraw(out.continuityRedraw ?? DEFAULT_CONTINUITY_REDRAW),
+            );
+        }
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
         this.updateSegmentContinuityUI();
@@ -6201,6 +6302,30 @@ class MiniMaxH3DirectorEditor {
             if (this.exposureAnchorStrengthVal) {
                 this.exposureAnchorStrengthVal.style.opacity = on ? "" : "0.4";
             }
+        }
+        const masterOn = show && isContinuityEnabled(this.timeline?.output);
+        if (this.segmentContinuityModeWrap) {
+            this.segmentContinuityModeWrap.hidden = !masterOn;
+            this.segmentContinuityModeWrap.setAttribute("aria-hidden", masterOn ? "false" : "true");
+            this.segmentContinuityModeWrap.title = masterOn ? t("tooltip.continuityMode") : "";
+        }
+        if (this.segmentContinuityMode && this.timeline?.output) {
+            const mode = normalizeContinuityMode(this.timeline.output.continuityMode);
+            this.segmentContinuityMode.value = mode;
+            this.timeline.output.continuityMode = mode;
+        }
+        const redrawOn = masterOn && normalizeContinuityMode(this.timeline?.output?.continuityMode) === "continue";
+        if (this.segmentContinuityRedrawWrap) {
+            this.segmentContinuityRedrawWrap.hidden = !redrawOn;
+            this.segmentContinuityRedrawWrap.setAttribute("aria-hidden", redrawOn ? "false" : "true");
+            this.segmentContinuityRedrawWrap.title = redrawOn ? t("tooltip.continuityRedraw") : "";
+        }
+        if (this.segmentContinuityRedraw && this.timeline?.output) {
+            const redraw = snapContinuityRedraw(
+                this.timeline.output.continuityRedraw ?? DEFAULT_CONTINUITY_REDRAW,
+            );
+            this.segmentContinuityRedraw.value = String(redraw);
+            this.timeline.output.continuityRedraw = redraw;
         }
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
@@ -6442,6 +6567,8 @@ class MiniMaxH3DirectorEditor {
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
             audioContinuityEnabled: true,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
         };
         if (key === "aspectRatio") {
             if (isCustomAspectRatio(value)) {
@@ -6503,6 +6630,10 @@ class MiniMaxH3DirectorEditor {
             let n = Math.round(Number(value) || 0);
             if (n > 0 && n < 1) n = Math.round(n * 100);
             this.timeline.output.exposureAnchorStrength = Math.max(0, Math.min(60, n));
+        } else if (key === "continuityMode") {
+            this.timeline.output.continuityMode = normalizeContinuityMode(value);
+        } else if (key === "continuityRedraw") {
+            this.timeline.output.continuityRedraw = snapContinuityRedraw(value);
         }
         this.syncOutputUIFromTimeline();
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
@@ -6585,6 +6716,10 @@ class MiniMaxH3DirectorEditor {
                 prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
             ),
             audioContinuityEnabled: isAudioContinuityEnabled(prevOut),
+            continuityMode: normalizeContinuityMode(prevOut.continuityMode),
+            continuityRedraw: snapContinuityRedraw(
+                prevOut.continuityRedraw ?? prevOut.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
+            ),
         };
         if (this.widthWidget) this.widthWidget.value = resolved.width;
         if (this.heightWidget) this.heightWidget.value = resolved.height;
@@ -6616,6 +6751,8 @@ class MiniMaxH3DirectorEditor {
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
             audioContinuityEnabled: true,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
         };
         if (this.timeline.output.audioMode == null) {
             this.timeline.output.audioMode = "generate";
@@ -6661,6 +6798,26 @@ class MiniMaxH3DirectorEditor {
             });
         } else if (this.timeline.output.exposureAnchorStrength == null) {
             this.timeline.output.exposureAnchorStrength = 40;
+        }
+        if (continuityEligible && this.segmentContinuityMode) {
+            this.timeline.output.continuityMode = normalizeContinuityMode(
+                this.segmentContinuityMode.value ?? this.timeline.output.continuityMode,
+            );
+        } else {
+            this.timeline.output.continuityMode = normalizeContinuityMode(
+                this.timeline.output.continuityMode,
+            );
+        }
+        if (continuityEligible && this.segmentContinuityRedraw) {
+            this.timeline.output.continuityRedraw = snapContinuityRedraw(
+                this.segmentContinuityRedraw.value
+                    ?? this.timeline.output.continuityRedraw
+                    ?? DEFAULT_CONTINUITY_REDRAW,
+            );
+        } else {
+            this.timeline.output.continuityRedraw = snapContinuityRedraw(
+                this.timeline.output.continuityRedraw,
+            );
         }
         this.syncOutputToWidgets();
     }
@@ -9108,8 +9265,8 @@ class MiniMaxH3DirectorEditor {
                 const seg = segs[index];
                 if (!seg) continue;
                 const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
-                const sec = preferredDurationSecFromFrames(fc, 24);
-                const play = framesToDurationSec(fc, 24);
+                const sec = preferredDurationSecFromFrames(fc, this.getFrameRate());
+                const play = framesToDurationSec(fc, this.getFrameRate());
                 if (input.value !== String(sec)) input.value = String(sec);
                 input.title = t("batch.durationTooltip", { frames: fc, play });
             }
@@ -9213,7 +9370,7 @@ class MiniMaxH3DirectorEditor {
                     const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
                     seg.frameCount = fc;
                     seg.length = fc;
-                    seg.durationSec = preferredDurationSecFromFrames(fc, 24);
+                    seg.durationSec = preferredDurationSecFromFrames(fc, this.getFrameRate());
                 }
                 normalizeImageBatchSegments(this);
                 this.renderImageBatchGroups();
@@ -10595,7 +10752,7 @@ class MiniMaxH3DirectorEditor {
             );
         }
         if (this.isGenMode() && this.isGlobalMode()) {
-            const defFc = this.timeline.gen?.defaultFrameCount ?? defaultFrameCount(this.getTaskKey());
+            const defFc = this.timeline.gen?.defaultFrameCount ?? defaultFrameCount(this.getTaskKey(), this.getFrameRate());
             if (this.genDefaultFc) this.genDefaultFc.value = defFc;
         }
 
@@ -10622,7 +10779,7 @@ class MiniMaxH3DirectorEditor {
             this.renderGenSrcSlot(this.genSegImg, liveSeg.genImage?.imageFile, t("panel.uploadSegmentSourceImage"));
         }
         if (this.isGenMode() && !this.isGlobalMode()) {
-            const fc = liveSeg.frameCount ?? liveSeg.length ?? defaultFrameCount(this.getTaskKey());
+            const fc = liveSeg.frameCount ?? liveSeg.length ?? defaultFrameCount(this.getTaskKey(), this.getFrameRate());
             if (this.genSegFc) this.genSegFc.value = fc;
         }
         if (this.isFl2vMode()) updateFl2vDetailUI(this);

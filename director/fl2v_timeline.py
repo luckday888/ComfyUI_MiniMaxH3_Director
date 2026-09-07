@@ -735,6 +735,8 @@ def build_fl2v_director_plan(
 
     from .segment_continuity import (
         resolve_audio_continuity_enabled,
+        resolve_continuity_mode,
+        resolve_continuity_redraw,
         resolve_continuity_settings,
         resolve_exposure_anchor_enabled,
         resolve_exposure_anchor_strength,
@@ -744,6 +746,8 @@ def build_fl2v_director_plan(
         timeline, segment_count=len(segments)
     )
     audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
+    continuity_mode = resolve_continuity_mode(timeline)
+    continuity_redraw = resolve_continuity_redraw(timeline)
     exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
     exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     run_indices = (
@@ -772,6 +776,8 @@ def build_fl2v_director_plan(
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
         audio_continuity_enabled=audio_continuity_enabled,
+        continuity_mode=continuity_mode,
+        continuity_redraw=continuity_redraw,
         exposure_anchor_enabled=exposure_anchor_enabled,
         exposure_anchor_strength=exposure_anchor_strength,
     )

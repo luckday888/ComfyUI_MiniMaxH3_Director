@@ -33,3 +33,6 @@ _seam_probe_*/
 
 .claude/
 .gitignore
+
+# Registry CLI leftover zip
+node.zip

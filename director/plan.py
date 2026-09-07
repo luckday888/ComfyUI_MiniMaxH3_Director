@@ -222,6 +222,9 @@ class DirectorPlan:
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
+    # "guide" (motion-context keyframes) | "continue" (引导+重绘 / latent remask).
+    continuity_mode: str = "guide"
+    continuity_redraw: float = 0.65
     # Audio handoff across the seam: when False, each segment keeps its own audio
     # (hard cut) even while video motion-context still stitches. Default True.
     audio_continuity_enabled: bool = True
@@ -830,6 +833,8 @@ def build_director_plan(
 
     from .segment_continuity import (
         resolve_audio_continuity_enabled,
+        resolve_continuity_mode,
+        resolve_continuity_redraw,
         resolve_continuity_settings,
         resolve_exposure_anchor_enabled,
         resolve_exposure_anchor_strength,
@@ -840,6 +845,8 @@ def build_director_plan(
         timeline, segment_count=len(segments)
     )
     audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
+    continuity_mode = resolve_continuity_mode(timeline)
+    continuity_redraw = resolve_continuity_redraw(timeline)
     exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
     exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     for seg, (_start, _end, seg_data) in zip(segments, segment_ranges):
@@ -876,6 +883,8 @@ def build_director_plan(
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
         audio_continuity_enabled=audio_continuity_enabled,
+        continuity_mode=continuity_mode,
+        continuity_redraw=continuity_redraw,
         exposure_anchor_enabled=exposure_anchor_enabled,
         exposure_anchor_strength=exposure_anchor_strength,
         global_ref_audios=global_ref_audios,
@@ -1002,7 +1011,8 @@ def plan_summary(plan: DirectorPlan) -> str:
                 if seg.index > 0 and not getattr(seg, "continuity_from_prev", True)
             ]
             lines.append(
-                f"Segment continuity: ON (motion context {plan.continuity_overlap_frames}f)"
+                f"Segment continuity: ON ({getattr(plan, 'continuity_mode', 'guide')} "
+                f"motion context {plan.continuity_overlap_frames}f)"
             )
             if pinned:
                 lines.append("  Pin from prev: #" + ", #".join(str(i) for i in pinned))
@@ -1054,7 +1064,8 @@ def plan_summary(plan: DirectorPlan) -> str:
             if seg.index > 0 and not getattr(seg, "continuity_from_prev", True)
         ]
         lines.append(
-            f"Segment continuity: ON (motion context {plan.continuity_overlap_frames}f "
+            f"Segment continuity: ON ({getattr(plan, 'continuity_mode', 'guide')} "
+            f"motion context {plan.continuity_overlap_frames}f "
             "→ pin previous tail + trim prefix; t2v/i2v/fl2v/r2v/v2v/rv2v)"
         )
         if pinned:
