@@ -585,6 +585,46 @@ async def minimax_clear_segment_cache(request):
         return web.Response(status=500, text=str(exc))
 
 
+def _coerce_preview_flag(value):
+    """HTTP body 里的预览开关值 → bool；None/空串返回 None（表示该项不改）。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == "":
+            return None
+        return v in ("1", "true", "on", "yes")
+    return bool(value)
+
+
+async def minimax_set_preview(request):
+    """采样运行中即时切换「实时预览 / 音频预览」开关。
+
+    写入进程内 preview_state，采样回调下一步即按新开关解码/推送；best-effort，
+    任何异常都不影响正在进行的采样。
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    tae = _coerce_preview_flag(body.get("live_tae_preview"))
+    audio = _coerce_preview_flag(body.get("live_audio_preview"))
+
+    try:
+        from .preview_state import set_preview
+
+        set_preview(node_id, tae=tae, audio=audio)
+        return web.json_response({"ok": True, "tae": tae, "audio": audio})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director set preview state failed: %s", exc)
+        return web.Response(status=500, text=str(exc))
+
+
 def _register_route(routes, method: str, path: str, handler) -> None:
     if hasattr(routes, "add_route"):
         routes.add_route(method, path, handler)
@@ -636,6 +676,12 @@ def register_routes() -> bool:
         "POST",
         "/minimax/director/clear_segment_cache",
         minimax_clear_segment_cache,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/set_preview",
+        minimax_set_preview,
     )
     from .pack import minimax_download_pack, minimax_export_pack, minimax_import_pack
 

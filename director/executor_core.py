@@ -90,6 +90,7 @@ from .segment_continuity import (
     resolve_prev_segment_output,
 )
 from .vram_cleanup import cleanup_segment_vram
+from .preview_state import get_preview, init_preview_state
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
@@ -419,6 +420,9 @@ def execute_director_plan_core(
         and decode_audio
         and audio_vae is not None
     )
+    # 运行时预览开关：先用提交值（plan.raw）初始化，采样进行中前端可经
+    # POST /minimax/director/set_preview 即时覆盖（preview_state），回调每步动态读取。
+    init_preview_state(node_id, tae=live_tae_preview, audio=live_audio_preview)
 
     all_segments = plan.segments
     # Drop caches for deleted/shortened timelines. Use every segment index (not
@@ -1062,8 +1066,11 @@ def execute_director_plan_core(
             )
 
         def _report_step_preview(step: int, total_steps: int, x0) -> None:
+            # 每步动态读取运行时开关：采样进行中前端 toggle 经 set_preview 即时改状态，
+            # 这里下一步即生效（开则解码推送、关则直接跳过，不空耗 TAE / 音频 VAE）。
+            pv = get_preview(node_id)
             # Live frame for the preview slot (「生成中…」 area).
-            if live_tae_preview:
+            if pv["tae"]:
                 try:
                     from .tae_preview import pil_to_jpeg_b64, x0_to_preview_pil
 
@@ -1086,14 +1093,18 @@ def execute_director_plan_core(
             # Emitted from the first step (early audio is not yet converged but
             # enough to judge voice-vs-music / energy contour and abort early);
             # the UI plays it manually (no autoplay).
-            if live_audio_preview:
+            # decode_audio / audio_vae 为运行不变量：运行中开启也不能突破
+            # mute/source 音频模式或缺失 audio VAE 的限制。
+            if pv["audio"] and decode_audio and audio_vae is not None:
                 try:
                     from .audio_preview import (
                         should_emit_audio_preview,
                         x0_to_audio_preview_b64,
                     )
 
-                    if should_emit_audio_preview(step, total_steps):
+                    # audio_arm：运行中「关→开」瞬间置位，让下一采样步立即推一帧，
+                    # 不必等 should_emit_audio_preview 的自适应节流步。
+                    if should_emit_audio_preview(step, total_steps) or pv.get("audio_arm"):
                         # 回调里的 x0 是「模型空间」预测：采样时 H3 把音频 stream 放大
                         # audio_scale 倍挂到视频调度上，采样结束才在
                         # inner_model.process_latent_out() 里除回 VAE 空间（成片路径，
@@ -1149,7 +1160,7 @@ def execute_director_plan_core(
                 shift_audio=shift_audio,
                 sigmas=first_pass_sigmas,
                 on_phase=_report_sample_phase,
-                on_step_preview=_report_step_preview if (live_tae_preview or live_audio_preview) else None,
+                on_step_preview=_report_step_preview,
                 preview_every=1,
                 after_shift=after_shift,
             )
@@ -1279,7 +1290,7 @@ def execute_director_plan_core(
                 shift_video=shift_video,
                 shift_audio=shift_audio,
                 on_phase=_report_sample_phase,
-                on_step_preview=_report_step_preview if (live_tae_preview or live_audio_preview) else None,
+                on_step_preview=_report_step_preview,
                 first_pass_images=upscale_frames,
                 trim_frames=trim_frames,
                 on_pass=_export_refine_pass if mp4_run_dir is not None else None,
@@ -1450,7 +1461,7 @@ def execute_director_plan_core(
             )
 
         if (
-            live_tae_preview
+            get_preview(node_id)["tae"]
             and seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"}
             and decoded.shape[0] >= 1
         ):
