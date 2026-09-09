@@ -163,6 +163,20 @@ def merge_indexed_refs(common: list, segment: list) -> list:
     return sorted(by_idx.values(), key=lambda r: int(getattr(r, "index", 0)))
 
 
+def resolve_seg_id(raw, index: int) -> str:
+    """读取段的稳定身份（timeline JSON 里持久存在的 ``id``）。
+
+    段间引导/磁盘缓存以该身份为键，因此删除前导段后保留段被重新编号（位置
+    index 改变）时，仍能找回自己的生成产物，下一段可正常接续。UI 段都带持久
+    ``id``；只有程序化、无身份来源的段才回退到 ``p<index>``（等价旧的位置键）。
+    绝不能用随机值——必须跨多次运行稳定，磁盘缓存才能跨删除/重排存活。
+    """
+    sid = ""
+    if isinstance(raw, dict):
+        sid = str(raw.get("id") or raw.get("seg_id") or "").strip()
+    return sid or f"p{int(index):04d}"
+
+
 @dataclass
 class SegmentPlan:
     index: int
@@ -187,6 +201,9 @@ class SegmentPlan:
     continuity_from_prev: bool = True
     # Official MiniMaxH3ReferenceToVideo combo: match | max. Per r2v/rv2v group.
     ref_image_size: str = "match"
+    # 稳定段身份（timeline 持久 id；无来源时为 ``p<index>``）。磁盘缓存与段间
+    # 引导按它定位，避免删除前导段导致位置下标移位后错读/丢失上一段产物。
+    seg_id: str = ""
 
     @property
     def frame_count(self) -> int:
@@ -818,6 +835,7 @@ def build_director_plan(
                 ref_audios=seg_ref_audios,
                 reference_video_meta=seg_ref_video,
                 reference_video_start_frame=ref_start,
+                seg_id=resolve_seg_id(seg_data, idx),
             )
         )
 

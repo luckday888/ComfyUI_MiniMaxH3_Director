@@ -26,6 +26,86 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
 
 SOURCE_VIDEO_FP_KEY = "source_video"
 
+# ── 稳定段身份 -> 磁盘存储前缀 ─────────────────────────────────────────────
+# 旧版本缓存按“位置下标”命名（seg_0009.*）。删除前导段后保留段会被重新编号，
+# 位置键随之改变，导致段间引导找不到上一段产物。现改为按 timeline 持久段 id
+# 命名（segid_<id>.*），旧的位置命名保留为读取回退；meta 内额外记录 seg_id，
+# 以便 prune 能把“移位后的旧位置文件”认领到当前段，而不是误删。
+_SEG_ID_SANITIZE_RE = re.compile(r"[^0-9A-Za-z_-]+")
+
+# 最终组 / 一采组磁盘后缀
+SFX_FINAL_FRAMES = ".pt"
+SFX_FINAL_META = ".meta.json"
+SFX_FINAL_AV = ".av.pt"
+SFX_FINAL_HANDOFF = ".handoff.json"
+SFX_FINAL_AUDIO = ".audio.pt"
+SFX_PRE_FRAMES = ".pre.pt"
+SFX_PRE_META = ".pre.meta.json"
+SFX_PRE_AV = ".pre.av.pt"
+SFX_PRE_HANDOFF = ".pre.handoff.json"
+
+
+def stable_seg_id(seg: SegmentPlan) -> str:
+    """段的持久身份；无身份来源时为空串（调用方据此回退旧位置键）。"""
+    return str(getattr(seg, "seg_id", "") or "").strip()
+
+
+def _sanitize_seg_id(sid: str) -> str:
+    return _SEG_ID_SANITIZE_RE.sub("_", str(sid).strip())[:80] or "seg"
+
+
+def _legacy_stem(index: int) -> str:
+    """旧版本位置命名前缀。"""
+    return f"seg_{int(index):04d}"
+
+
+def _stable_stem(seg: SegmentPlan) -> str:
+    return f"segid_{_sanitize_seg_id(stable_seg_id(seg))}"
+
+
+def _candidate_stems(seg: SegmentPlan) -> list[str]:
+    """读取候选前缀：稳定 id 命名优先，旧的位置数字命名作为回退，去重保序。"""
+    stems = [_stable_stem(seg), _legacy_stem(seg.index)]
+    out: list[str] = []
+    for stem in stems:
+        if stem and stem not in out:
+            out.append(stem)
+    return out
+
+
+def _write_stem(seg: SegmentPlan) -> str:
+    """保存目标前缀：有稳定 id 用稳定命名，否则回退旧位置命名。"""
+    return _candidate_stems(seg)[0]
+
+
+def _resolve_stem(
+    root: Path, seg: SegmentPlan, meta_sfx: str, primary_sfx: str
+) -> str:
+    """定位该段在磁盘上实际使用的前缀。
+
+    以 meta 文件为锚（指纹文件），其次主资源；都不存在时返回首选前缀（供
+    保存/拼路径）。这样同一段的 frames/av/handoff/audio 始终取自同一组文件。
+    """
+    candidates = _candidate_stems(seg)
+    for suffix in (meta_sfx, primary_sfx):
+        for stem in candidates:
+            if (root / f"{stem}{suffix}").is_file():
+                return stem
+    return candidates[0]
+
+
+def _reject_owner_mismatch(stored: Any, seg: SegmentPlan) -> bool:
+    """旧位置命名文件可能因段移位而属于别的段——按 meta 内 seg_id 硬拦截。
+
+    与“源视频变更”同级，优先于 allow_stale：即使允许 stale，也绝不拿别的段的
+    产物充当本段。历史缓存 meta 无 seg_id 时不拦截，保持向后兼容。
+    """
+    sid = stable_seg_id(seg)
+    if not sid or not isinstance(stored, dict):
+        return False
+    stored_sid = str(stored.get("seg_id") or "").strip()
+    return bool(stored_sid) and stored_sid != sid
+
 
 def source_video_identity(plan: DirectorPlan) -> list[str]:
     """Stable source-clip identity: relative path + size + mtime (overwrite-safe)."""
@@ -130,6 +210,7 @@ def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[
         or ""
     ).strip()
     return {
+        "seg_id": stable_seg_id(seg),
         "index": seg.index,
         "start": seg.start_frame,
         "end": seg.end_frame,
@@ -278,6 +359,46 @@ def _frames_from_disk(loaded: Any) -> torch.Tensor | None:
     return loaded.float()
 
 
+def _retire_legacy_copies(
+    root: Path, seg: SegmentPlan, suffixes, meta_sfx: str = SFX_FINAL_META
+) -> None:
+    """段已写入稳定命名后，删除属于同一段的旧位置命名副本，避免双份占用。
+
+    仅当旧位置文件的 meta 明确记录 seg_id == 当前段时才删除；身份不明的历史
+    缓存保留（保守，绝不误删）。无稳定 id（保存前缀本身即旧位置命名）时跳过。
+    """
+    sid = stable_seg_id(seg)
+    if not sid or _write_stem(seg) == _legacy_stem(seg.index):
+        return
+    legacy = _legacy_stem(seg.index)
+    meta_path = root / f"{legacy}{meta_sfx}"
+    try:
+        if not meta_path.is_file():
+            return
+        stored = json.loads(meta_path.read_text(encoding="utf-8"))
+        if str((stored or {}).get("seg_id") or "").strip() != sid:
+            return
+    except Exception:
+        return
+    for suffix in suffixes:
+        _safe_unlink(root / f"{legacy}{suffix}")
+
+
+_FINAL_ALL_SUFFIXES = (
+    SFX_FINAL_FRAMES,
+    SFX_FINAL_META,
+    SFX_FINAL_AV,
+    SFX_FINAL_HANDOFF,
+    SFX_FINAL_AUDIO,
+)
+_PRE_ALL_SUFFIXES = (
+    SFX_PRE_FRAMES,
+    SFX_PRE_META,
+    SFX_PRE_AV,
+    SFX_PRE_HANDOFF,
+)
+
+
 def save_segment_cache(
     node_id: str | None,
     seg: SegmentPlan,
@@ -304,11 +425,12 @@ def save_segment_cache(
         return
     fp = segment_cache_fingerprint(seg, plan)
     idx = seg.index
-    pt_path = root / f"seg_{idx:04d}.pt"
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    latent_path = root / f"seg_{idx:04d}.av.pt"
-    handoff_path = root / f"seg_{idx:04d}.handoff.json"
-    audio_path = root / f"seg_{idx:04d}.audio.pt"
+    stem = _write_stem(seg)
+    pt_path = root / f"{stem}{SFX_FINAL_FRAMES}"
+    meta_path = root / f"{stem}{SFX_FINAL_META}"
+    latent_path = root / f"{stem}{SFX_FINAL_AV}"
+    handoff_path = root / f"{stem}{SFX_FINAL_HANDOFF}"
+    audio_path = root / f"{stem}{SFX_FINAL_AUDIO}"
     try:
         payload = _frames_to_disk(tensor)
         _write_via_temp(pt_path, lambda p: torch.save(payload, p))
@@ -344,6 +466,8 @@ def save_segment_cache(
                 ", keep-audio" if not replace_audio else ""
             ),
         )
+        # 段移位后用稳定 id 重新落盘，清掉同段的旧位置命名文件，避免双份。
+        _retire_legacy_copies(root, seg, _FINAL_ALL_SUFFIXES)
     except Exception as exc:
         # Xiangong / similar: RO mount or same-name write → skip cache, keep run alive.
         log.warning(
@@ -351,7 +475,7 @@ def save_segment_cache(
             idx + 1,
             exc,
         )
-        for stray in root.glob(f".seg_{idx:04d}.*"):
+        for stray in root.glob(f".{stem}.*"):
             _safe_unlink(stray)
 
 
@@ -376,13 +500,16 @@ def load_segment_handoff_meta(
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    handoff_path = root / f"seg_{idx:04d}.handoff.json"
+    stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
+    meta_path = root / f"{stem}{SFX_FINAL_META}"
+    handoff_path = root / f"{stem}{SFX_FINAL_HANDOFF}"
     if not meta_path.is_file() or not handoff_path.is_file():
         return None
     try:
         expected = segment_cache_fingerprint(seg, plan)
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
+        if _reject_owner_mismatch(stored, seg):
+            return None
         if stored != expected:
             if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
                 return None
@@ -433,13 +560,16 @@ def load_segment_av_latent(
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    latent_path = root / f"seg_{idx:04d}.av.pt"
+    stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
+    meta_path = root / f"{stem}{SFX_FINAL_META}"
+    latent_path = root / f"{stem}{SFX_FINAL_AV}"
     if not meta_path.is_file() or not latent_path.is_file():
         return None
     try:
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
         expected = segment_cache_fingerprint(seg, plan)
+        if _reject_owner_mismatch(stored, seg):
+            return None
         if stored != expected:
             if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
                 return None
@@ -464,13 +594,16 @@ def _fingerprint_matches(
     root = _cache_root(node_id)
     if root is None:
         return False
-    meta_path = root / f"seg_{seg.index:04d}.meta.json"
-    tensor_path = root / f"seg_{seg.index:04d}.pt"
+    stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
+    meta_path = root / f"{stem}{SFX_FINAL_META}"
+    tensor_path = root / f"{stem}{SFX_FINAL_FRAMES}"
     if not meta_path.is_file():
         return False
     try:
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
         expected = segment_cache_fingerprint(seg, plan)
+        if _reject_owner_mismatch(stored, seg):
+            return False
         if stored == expected:
             return True
         if _reject_source_stale(stored, expected, seg_index=seg.index, quiet=True):
@@ -501,14 +634,17 @@ def load_segment_cache(
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    tensor_path = root / f"seg_{idx:04d}.pt"
+    stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
+    meta_path = root / f"{stem}{SFX_FINAL_META}"
+    tensor_path = root / f"{stem}{SFX_FINAL_FRAMES}"
     if not tensor_path.is_file():
         return None
     try:
         expected = segment_cache_fingerprint(seg, plan)
         if meta_path.is_file():
             stored = json.loads(meta_path.read_text(encoding="utf-8"))
+            if _reject_owner_mismatch(stored, seg):
+                return None
             if stored != expected:
                 if _reject_source_stale(stored, expected, seg_index=idx):
                     return None
@@ -559,7 +695,8 @@ def load_segment_audio(
     root = _cache_root(node_id)
     if root is None:
         return None
-    audio_path = root / f"seg_{seg.index:04d}.audio.pt"
+    stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
+    audio_path = root / f"{stem}{SFX_FINAL_AUDIO}"
     if not audio_path.is_file():
         return None
     try:
@@ -595,10 +732,11 @@ def save_first_pass_cache(
         return
     fp = first_pass_cache_fingerprint(seg, plan)
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
-    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
-    frames_path = root / f"seg_{idx:04d}.pre.pt"
-    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    stem = _write_stem(seg)
+    meta_path = root / f"{stem}{SFX_PRE_META}"
+    latent_path = root / f"{stem}{SFX_PRE_AV}"
+    frames_path = root / f"{stem}{SFX_PRE_FRAMES}"
+    handoff_path = root / f"{stem}{SFX_PRE_HANDOFF}"
     try:
         cpu_latent = _av_latent_to_cpu(av_latent)
         _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
@@ -621,13 +759,17 @@ def save_first_pass_cache(
             node_id,
             fp.get("seed"),
         )
+        # 段移位后用稳定 id 重新落盘，清掉同段的旧位置命名一采副本。
+        _retire_legacy_copies(
+            root, seg, _PRE_ALL_SUFFIXES, meta_sfx=SFX_PRE_META
+        )
     except Exception as exc:
         log.warning(
             "Segment %d first-pass cache write skipped (%s).",
             idx + 1,
             exc,
         )
-        for stray in root.glob(f".seg_{idx:04d}.pre.*"):
+        for stray in root.glob(f".{stem}.*"):
             _safe_unlink(stray)
 
 
@@ -682,15 +824,18 @@ def load_first_pass_frames_stale(
     if root is None:
         return None
     idx = seg.index
-    frames_path = root / f"seg_{idx:04d}.pre.pt"
-    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
-    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    stem = _resolve_stem(root, seg, SFX_PRE_META, SFX_PRE_AV)
+    frames_path = root / f"{stem}{SFX_PRE_FRAMES}"
+    meta_path = root / f"{stem}{SFX_PRE_META}"
+    handoff_path = root / f"{stem}{SFX_PRE_HANDOFF}"
     if not frames_path.is_file():
         return None
     try:
         if meta_path.is_file():
             stored = json.loads(meta_path.read_text(encoding="utf-8"))
             expected = first_pass_cache_fingerprint(seg, plan)
+            if _reject_owner_mismatch(stored, seg):
+                return None
             if _reject_source_stale(stored, expected, seg_index=idx, quiet=True):
                 return None
         loaded = torch.load(frames_path, map_location="cpu", weights_only=True)
@@ -727,15 +872,18 @@ def load_first_pass_cache(
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
-    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
-    frames_path = root / f"seg_{idx:04d}.pre.pt"
-    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    stem = _resolve_stem(root, seg, SFX_PRE_META, SFX_PRE_AV)
+    meta_path = root / f"{stem}{SFX_PRE_META}"
+    latent_path = root / f"{stem}{SFX_PRE_AV}"
+    frames_path = root / f"{stem}{SFX_PRE_FRAMES}"
+    handoff_path = root / f"{stem}{SFX_PRE_HANDOFF}"
     if not meta_path.is_file() or not latent_path.is_file():
         return None
     try:
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
         expected = first_pass_cache_fingerprint(seg, plan)
+        if isinstance(stored, dict) and _reject_owner_mismatch(stored, seg):
+            return None
         if not isinstance(stored, dict) or stored != expected:
             if isinstance(stored, dict) and _reject_source_stale(
                 stored, expected, seg_index=idx, quiet=True,
@@ -773,14 +921,47 @@ def load_first_pass_cache(
         return None
 
 
-_SEG_CACHE_FILE_RE = re.compile(r"^seg_(\d+)\.")
+# 文件名后缀（特异性长的在前），用于把缓存文件名剥离出存储前缀
+_CACHE_SUFFIXES_FOR_PARSE = (
+    SFX_PRE_META,
+    SFX_PRE_AV,
+    SFX_PRE_HANDOFF,
+    SFX_PRE_FRAMES,
+    SFX_FINAL_META,
+    SFX_FINAL_AV,
+    SFX_FINAL_HANDOFF,
+    SFX_FINAL_AUDIO,
+    SFX_FINAL_FRAMES,
+)
+_STABLE_PREFIX_RE = re.compile(r"^segid_(.+)$")
+_LEGACY_PREFIX_RE = re.compile(r"^seg_(\d+)$")
 
 
-def prune_segment_cache(node_id: str | None, valid_indices) -> None:
-    """Remove ``seg_XXXX.*`` files whose index is no longer on the timeline.
+def _split_cache_stem(name: str) -> str | None:
+    """从缓存文件名剥离已知后缀，返回存储前缀；无法识别返回 None。"""
+    if name.startswith("."):
+        return None
+    for suffix in _CACHE_SUFFIXES_FOR_PARSE:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return None
 
-    Does not create the cache dir. Uses all current segment indices (not
-    「选择运行」), so unselected slots keep merge/export fill. Never raises.
+
+def prune_segment_cache(node_id: str | None, valid_segments) -> None:
+    """删除时间轴上已不存在的段所拥有的缓存文件。
+
+    ``valid_segments`` 接收当前段对象（含 ``seg_id/index``）；也兼容旧的 int
+    下标列表。判定规则（绝不在身份不明时误删）：
+
+    - ``segid_<id>.*``（新稳定命名）：属主 id 不在当前段集合 → 删除。
+    - ``seg_XXXX.*``（旧位置命名）：读取其 meta 内 seg_id——
+        * 明确属主且该属主已不在 → 删除；
+        * 明确属主且仍在（段删除前导后移位，旧位置文件仍是它的回退）→ 保留；
+        * 无 seg_id（升级前遗留缓存，无法判定归属）→ 保守保留。
+    - 其它无法识别的文件：保留。
+
+    使用全部当前段（而非「选择运行」子集），未选中的段仍保留导出填充缓存。
+    Never raises.
     """
     if not node_id:
         return
@@ -788,15 +969,54 @@ def prune_segment_cache(node_id: str | None, valid_indices) -> None:
         root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
         if not root.is_dir():
             return
-        valid = {int(i) for i in valid_indices}
+        valid_ids: set[str] = set()
+        valid_safe_ids: set[str] = set()
+        for item in valid_segments:
+            if hasattr(item, "seg_id"):
+                sid = str(getattr(item, "seg_id", "") or "").strip()
+                if sid:
+                    valid_ids.add(sid)
+                    valid_safe_ids.add(_sanitize_seg_id(sid))
+            # 旧的 int 下标入参无法表达稳定身份：只保留不识别，交由下方
+            # “无属主历史文件保守保留”逻辑处理。
+
+        def legacy_owner(stem: str) -> str | None:
+            """读取旧位置命名 meta 里记录的属主 seg_id（无则 None）。"""
+            for meta_sfx in (SFX_FINAL_META, SFX_PRE_META):
+                meta_path = root / f"{stem}{meta_sfx}"
+                if not meta_path.is_file():
+                    continue
+                try:
+                    data = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                owner = str((data or {}).get("seg_id") or "").strip()
+                if owner:
+                    return owner
+            return None
+
         removed = 0
-        for path in root.iterdir():
+        for path in sorted(root.iterdir()):
             if not path.is_file():
                 continue
-            m = _SEG_CACHE_FILE_RE.match(path.name)
-            if not m or int(m.group(1)) in valid:
+            stem = _split_cache_stem(path.name)
+            if stem is None:
                 continue
-            if _safe_unlink(path):
+            keep = True
+            stable = _STABLE_PREFIX_RE.match(stem)
+            if stable:
+                keep = stable.group(1) in valid_safe_ids
+            else:
+                legacy = _LEGACY_PREFIX_RE.match(stem)
+                if legacy is None:
+                    continue  # 不识别的文件，保留
+                owner = legacy_owner(stem)
+                if owner is not None:
+                    keep = owner in valid_ids
+                else:
+                    # 升级前遗留缓存，meta 无属主：无法安全判定，保守保留。
+                    keep = True
+            if not keep and _safe_unlink(path):
                 removed += 1
         if removed:
             log.info(
@@ -820,7 +1040,10 @@ def first_pass_cache_disk_signature(node_id: str | None) -> str:
         return ""
     parts: list[str] = []
     try:
-        for path in sorted(root.glob("seg_*.pre.*")):
+        paths: list[Path] = []
+        for pattern in ("segid_*.pre.*", "seg_*.pre.*"):
+            paths.extend(root.glob(pattern))
+        for path in sorted(paths):
             try:
                 st = path.stat()
             except OSError:
@@ -873,12 +1096,14 @@ def inspect_first_pass_cache(
     for seg in all_segments:
         is_selected = selected_set is None or int(seg.index) in selected_set
         idx = int(seg.index)
-        meta_path = root / f"seg_{idx:04d}.pre.meta.json"
-        latent_path = root / f"seg_{idx:04d}.pre.av.pt"
+        pre_stem = _resolve_stem(root, seg, SFX_PRE_META, SFX_PRE_AV)
+        meta_path = root / f"{pre_stem}{SFX_PRE_META}"
+        latent_path = root / f"{pre_stem}{SFX_PRE_AV}"
         meta_exists = meta_path.is_file()
         latent_exists = latent_path.is_file()
         cache_exists = meta_exists and latent_exists
-        if (root / f"seg_{idx:04d}.pt").is_file():
+        final_stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
+        if (root / f"{final_stem}{SFX_FINAL_FRAMES}").is_file():
             final_cached += 1
         stored: Any = None
         read_error = ""

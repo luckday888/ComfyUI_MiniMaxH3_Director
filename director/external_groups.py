@@ -364,6 +364,7 @@ def build_plan_from_external_groups(
         merge_indexed_refs,
         reinforce_r2v_prompt,
         resolve_ref_image_size,
+        resolve_seg_id,
     )
 
     timeline = _parse_timeline_meta(timeline_data)
@@ -508,6 +509,7 @@ def build_plan_from_external_groups(
                     negative_prompt=DEFAULT_FL2V_NEGATIVE if seg_task_key == "fl2v" else "",
                     source_clip=source_clip,
                     ui_index=int(src_index),
+                    seg_id=resolve_seg_id(g, plan_idx),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
@@ -582,6 +584,7 @@ def build_plan_from_external_groups(
                     ref_video_audios=ref_video_audios,
                     source_clip=None,
                     ui_index=int(src_index),
+                    seg_id=resolve_seg_id(g, plan_idx),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),

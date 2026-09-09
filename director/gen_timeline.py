@@ -383,6 +383,7 @@ def build_gen_director_plan(
         concat_common_segment_prompt,
         merge_indexed_refs,
         resolve_ref_image_size,
+        resolve_seg_id,
         segment_ref_audios_for_context,
         segment_refs_for_context,
     )
@@ -653,6 +654,7 @@ def build_gen_director_plan(
                 ref_videos=seg_ref_videos,
                 negative_prompt=seg_negative,
                 source_clip=seg_source,
+                seg_id=resolve_seg_id(seg_data, idx),
                 continuity_from_prev=resolve_segment_continuity_from_prev(
                     seg_data if isinstance(seg_data, dict) else {},
                     segment_index=idx,

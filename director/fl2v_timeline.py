@@ -545,6 +545,7 @@ def build_fl2v_director_plan(
         SegmentRef,
         _parse_run_selection,
         _resolve_export_mode,
+        resolve_seg_id,
     )
 
     global_block = timeline.get("global") or {}
@@ -709,6 +710,7 @@ def build_fl2v_director_plan(
                 refs=refs,
                 negative_prompt=shot_negative,
                 source_clip=source_clip,
+                seg_id=resolve_seg_id(shot, plan_index),
                 continuity_from_prev=resolve_segment_continuity_from_prev(
                     shot if isinstance(shot, dict) else {},
                     segment_index=plan_index,
