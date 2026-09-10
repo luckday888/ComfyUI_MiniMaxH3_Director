@@ -8,7 +8,7 @@ from typing import Any, Callable
 import torch
 
 from ..lib.image_prep import ensure_minimax_canvas
-from .core_sampling import sample_single_stage
+from .core_sampling import get_persistent_shifted_model, sample_single_stage
 from .refine_pack import (
     latent_upscale_model_name,
     refine_model_for,
@@ -437,6 +437,7 @@ def apply_segment_refine(
     first_pass_images: torch.Tensor | None = None,
     trim_frames: int = 0,
     on_pass: RefinePassCallback | None = None,
+    on_loaded: Callable[[Any], None] | None = None,
 ) -> tuple[dict, str]:
     """Run optional refine/upscale second sample. Never raises — returns first-pass on failure.
 
@@ -582,6 +583,11 @@ def apply_segment_refine(
                 "Unwire refine_model so the first-pass UNET (Turbo+Sage) is reused, "
                 "or use a matching second-pass UNET."
             )
+        # 二采复用主（或自定义）UNET 的进程级持久 SigmaShift clone，避免每个 pass
+        # 新建即弃 clone 触发 is_dead 假泄漏；refine 不装 remask，无一次性 clone。
+        shifted_refine = get_persistent_shifted_model(
+            refine_model, shift_video, shift_audio
+        )
         # Pass 1 samples after optional upscale; later passes are same-canvas refine only.
         for i in range(n_passes):
             log.info(
@@ -613,7 +619,8 @@ def apply_segment_refine(
                 preview_every=-1,
                 phase_name="refine",
                 sigmas=sigma_list,
-                apply_shift=True,
+                shifted_model=shifted_refine,
+                on_loaded=on_loaded,
             )
             last_ok = work
             if on_pass is not None:

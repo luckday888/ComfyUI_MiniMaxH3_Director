@@ -12,7 +12,7 @@ import torch
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from ..nodes.conditioning import run_minimax_conditioning
-from .core_sampling import sample_single_stage
+from .core_sampling import get_persistent_shifted_model, sample_single_stage
 from .refine_pack import (
     confirm_first_pass_enabled,
     first_pass_sigmas_override,
@@ -89,7 +89,7 @@ from .segment_continuity import (
     is_continuity_active,
     resolve_prev_segment_output,
 )
-from .vram_cleanup import cleanup_segment_vram
+from .vram_cleanup import cleanup_segment_vram, restore_persistent_model_registration
 from .preview_state import get_preview, init_preview_state
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
@@ -551,6 +551,28 @@ def execute_director_plan_core(
     # completed_* also get export-fill hydrations from disk; this set does not.
     resampled_this_run: set[int] = set()
     held_for_confirmation = False
+    # ── 模型 patcher 保活（消除 ComfyUI is_dead 假泄漏告警）──────────────────
+    # persistent_shifted：主 MODEL 的进程级持久 SigmaShift clone，整次运行复用，
+    # 非引导段每段加载的都是同一个 patcher（current_loaded_models 命中复用，不产生
+    # 即弃 clone）。held_loaded_model：滚动强引用“最近一次真正被 load_models_gpu
+    # 登记”的 patcher（引导+重绘段是一次性 remask clone），只保留到下一次模型加载
+    # 之后——届时旧 patcher 仍存活，官方 is_clone 清扫能正常摘除其登记条目，避免
+    # “patcher 已被 GC、底层 MiniMaxH3 仍活”的 is_dead 死条目逐段堆积。
+    persistent_shifted = None
+    held_loaded_model = None
+
+    def _get_main_shifted():
+        nonlocal persistent_shifted
+        if persistent_shifted is None:
+            persistent_shifted = get_persistent_shifted_model(
+                model, float(shift_video), float(shift_audio)
+            )
+        return persistent_shifted
+
+    def _on_loaded(loaded_model) -> None:
+        nonlocal held_loaded_model
+        held_loaded_model = loaded_model
+
     # Open-loop exposure anchor: absolute per-channel target = first exported
     # segment's exposure, shared across the run so per-segment brightness drift is
     # levelled. Pixel-only; never fed back into latents or audio (the native latent
@@ -1060,7 +1082,13 @@ def execute_director_plan_core(
 
         # Single / last segment: skip — official H3 also keeps models loaded.
         if clear_vram_between_segments and seg_total > 1:
-            cleanup_segment_vram(enabled=True, unload_models=True)
+            cleanup_segment_vram(
+                enabled=True,
+                unload_models=True,
+                # 上一次加载的 patcher（可能是 remask clone）此刻仍被滚动槽持有，
+                # 在其存活期卸载才能让官方正常摘除登记、不留 is_dead 死条目。
+                models=(held_loaded_model, persistent_shifted),
+            )
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
@@ -1166,6 +1194,8 @@ def execute_director_plan_core(
                 on_step_preview=_report_step_preview,
                 preview_every=1,
                 after_shift=after_shift,
+                shifted_model=_get_main_shifted(),
+                on_loaded=_on_loaded,
             )
 
         first_pass_samples = samples
@@ -1297,6 +1327,7 @@ def execute_director_plan_core(
                 first_pass_images=upscale_frames,
                 trim_frames=trim_frames,
                 on_pass=_export_refine_pass if mp4_run_dir is not None else None,
+                on_loaded=_on_loaded,
             )
         elif hold_after_first:
             refine_note = (
@@ -1487,7 +1518,10 @@ def execute_director_plan_core(
                 log.debug("Segment video preview skipped: %s", exc)
 
         if clear_vram_between_segments and progress_index < seg_total - 1:
-            cleanup_segment_vram(enabled=True)
+            cleanup_segment_vram(
+                enabled=True,
+                models=(held_loaded_model, persistent_shifted),
+            )
 
         reports.append(
             f"Segment {ui_idx + 1}/{timeline_seg_total}: {task_hint} "
@@ -1534,7 +1568,10 @@ def execute_director_plan_core(
                     )
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
-                cleanup_segment_vram(enabled=True)
+                cleanup_segment_vram(
+                    enabled=True,
+                    models=(held_loaded_model, persistent_shifted),
+                )
             chunk, audio_dict, pre_chunk = _run_one_segment(
                 seg, progress_index=progress_pos[seg.index]
             )
@@ -1759,6 +1796,10 @@ def execute_director_plan_core(
             if same_as_final
             else concat_continuous_chunks(pre_source, export_segments, plan)
         )
+    # 收尾：末段若是引导+重绘，最近加载的是一次性 remask clone（仍被滚动槽持有、
+    # 存活）。在返回前让官方把登记交还给跨运行存活的持久 shift clone，使滚动槽随
+    # 栈帧销毁后 current_loaded_models 不留 is_dead 条目（不采样、不读盘、近乎空转）。
+    restore_persistent_model_registration(persistent_shifted, held_loaded_model)
     return (
         combined,
         segment_outputs,
