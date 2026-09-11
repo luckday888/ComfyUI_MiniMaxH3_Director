@@ -332,6 +332,8 @@ def _apply_h3_latent_upscale(
     vae,
     refine_positive,
     on_phase=None,
+    prev_refine_av=None,
+    prev_end_frame: int | None = None,
 ) -> tuple[dict, Any, list[str]]:
     from .h3_latent_upscale import upscale_h3_video_latent
 
@@ -357,6 +359,7 @@ def _apply_h3_latent_upscale(
         source_height=src_h,
         model_name=model_name,
         model=latent_mod,
+        enable_latent_chunking=bool(pack.get("enable_latent_chunking", False)),
     )
     if isinstance(encoded, dict):
         encoded.pop("noise_mask", None)
@@ -365,24 +368,53 @@ def _apply_h3_latent_upscale(
         audio_latent.pop("noise_mask", None)
     work = _join_av(encoded, audio_latent, work)
     notes = [f"{tw}×{th}", "h3_latent"]
-    if pin_frames > 0 and first_pass_images is not None:
+    if pin_frames > 0:
         try:
-            prefix = first_pass_images[:pin_frames]
-            ph, pw = int(prefix.shape[1]), int(prefix.shape[2])
-            if pw != tw or ph != th:
-                prefix = _scale_images(prefix, tw, th)
-            refine_positive, pinned = _repin_after_upscale(
+            prefix = None
+            if first_pass_images is not None:
+                prefix = first_pass_images[:pin_frames]
+                ph, pw = int(prefix.shape[1]), int(prefix.shape[2])
+                if pw != tw or ph != th:
+                    prefix = _scale_images(prefix, tw, th)
+            refine_positive, pinned, work = _repin_after_upscale(
                 refine_positive,
                 work,
                 vae=vae,
                 prefix_frames=prefix,
                 trim_frames=pin_frames,
                 task_key=task_key,
+                prev_refine_av=prev_refine_av,
+                prev_end_frame=prev_end_frame,
             )
             if pinned:
                 notes.append(f"re-pin {pin_frames}f")
         except Exception as exc:
-            log.warning("H3 latent upscale re-pin failed (%s); continuing.", exc)
+            # Stale first-pass Guide keyframes are the old canvas — sampling
+            # the upscaled latent with them crashes (and the fallback looks soft).
+            log.warning(
+                "H3 latent upscale re-pin failed (%s); retrying keyframes only.",
+                exc,
+            )
+            try:
+                from .h3_motion_context import apply_motion_context
+
+                refine_positive, _, _ = apply_motion_context(
+                    refine_positive,
+                    work,
+                    vae=vae,
+                    context_length=pin_frames,
+                    context_latent=prev_refine_av,
+                    context_end_frame=prev_end_frame,
+                    context_frames=prefix,
+                    continue_audio=False,
+                    keep_existing_keyframes=(task_key == "fl2v"),
+                )
+                notes.append(f"re-pin {pin_frames}f (keyframes)")
+            except Exception as retry_exc:
+                raise RuntimeError(
+                    f"H3 latent upscale re-pin failed ({exc}); "
+                    f"keyframe retry also failed ({retry_exc})"
+                ) from retry_exc
     if on_phase:
         on_phase("upscale", 1)
     return work, refine_positive, notes
@@ -393,26 +425,135 @@ def _repin_after_upscale(
     latent: dict,
     *,
     vae,
-    prefix_frames: torch.Tensor,
     trim_frames: int,
     task_key: str,
+    prefix_frames: torch.Tensor | None = None,
+    prev_refine_av=None,
+    prev_end_frame: int | None = None,
 ):
-    """Rebuild motion-context keyframes at the new canvas. Does not touch first-pass."""
-    from .h3_motion_context import apply_motion_context
+    """Rebuild motion-context keyframes at the new canvas. Does not touch first-pass.
 
-    n = min(int(trim_frames), int(prefix_frames.shape[0]))
+    Prefer the previous segment's refined AV tail when canvases match: paste that
+    tail into the current latent head and re-pin keyframes so the second sample
+    locks to the look that will actually be concatenated.
+    Else slice this clip's upscaled head. Last resort: encode prefix frames.
+    """
+    from .h3_motion_context import (
+        apply_motion_context,
+        av_pixel_size,
+        copy_av_tail_into_prefix,
+        slice_av_prefix,
+    )
+
+    n = max(0, int(trim_frames or 0))
     if n < 1:
-        return positive, False
-    new_positive, _, _ = apply_motion_context(
-        positive,
-        latent,
+        return positive, False, latent
+    keep_fl2v = task_key == "fl2v"
+    target_sz = av_pixel_size(latent)
+    prev_sz = av_pixel_size(prev_refine_av)
+    work = latent
+    if target_sz is not None and prev_sz == target_sz:
+        log.info(
+            "Director refine: re-pin from previous refined tail %dx%d",
+            prev_sz[0],
+            prev_sz[1],
+        )
+        work = copy_av_tail_into_prefix(
+            latent, prev_refine_av, n, end_frame=prev_end_frame
+        )
+        try:
+            new_positive, _, _ = apply_motion_context(
+                positive,
+                work,
+                vae=vae,
+                context_length=n,
+                context_latent=prev_refine_av,
+                context_end_frame=prev_end_frame,
+                continue_audio=False,
+                keep_existing_keyframes=keep_fl2v,
+            )
+            return new_positive, True, work
+        except Exception as exc:
+            log.warning(
+                "Director refine: pasted prefix but keyframe pin failed (%s); "
+                "retrying pin on the upscaled latent.",
+                exc,
+            )
+            new_positive, _, _ = apply_motion_context(
+                positive,
+                latent,
+                vae=vae,
+                context_length=n,
+                context_latent=prev_refine_av,
+                context_end_frame=prev_end_frame,
+                continue_audio=False,
+                keep_existing_keyframes=keep_fl2v,
+            )
+            # Packed paste is unreadable — keep the NestedTensor upscale body.
+            return new_positive, True, latent
+    try:
+        prefix_latent = slice_av_prefix(latent, n)
+        new_positive, _, _ = apply_motion_context(
+            positive,
+            latent,
+            vae=vae,
+            context_length=n,
+            context_latent=prefix_latent,
+            continue_audio=False,
+            keep_existing_keyframes=keep_fl2v,
+        )
+        return new_positive, True, latent
+    except Exception as exc:
+        if prefix_frames is None or int(prefix_frames.shape[0]) < 1:
+            raise
+        log.warning(
+            "Director refine: latent-head re-pin failed (%s); encoding prefix frames.",
+            exc,
+        )
+        n_pix = min(n, int(prefix_frames.shape[0]))
+        new_positive, _, _ = apply_motion_context(
+            positive,
+            latent,
+            vae=vae,
+            context_length=n_pix,
+            context_frames=prefix_frames[:n_pix],
+            continue_audio=False,
+            keep_existing_keyframes=keep_fl2v,
+        )
+        return new_positive, True, latent
+
+
+def _relock_continue_refine(
+    work: dict,
+    *,
+    vae,
+    audio_vae=None,
+    pin_frames: int,
+    prev_refine_av=None,
+    prev_end_frame: int | None = None,
+    prev_tail: torch.Tensor | None = None,
+    seam_min: float = 0.10,
+) -> tuple[dict, bool]:
+    """Rewrite the continue prefix + mask onto refine latent. No Guide keyframes."""
+    from .h3_latent_continue import apply_latent_continue
+
+    n = max(0, int(pin_frames or 0))
+    if n < 1:
+        return work, False
+    if prev_refine_av is None and (prev_tail is None or int(getattr(prev_tail, "shape", [0])[0]) < 1):
+        return work, work.get("noise_mask") is not None
+    locked, _span, _trim = apply_latent_continue(
+        work,
+        prev_av=prev_refine_av,
+        prev_tail=prev_tail,
         vae=vae,
         context_length=n,
-        context_frames=prefix_frames[:n],
-        continue_audio=False,
-        keep_existing_keyframes=(task_key == "fl2v"),
+        context_end_frame=prev_end_frame,
+        pin_audio=False,
+        audio_vae=audio_vae,
+        seam_min_mask=seam_min,
     )
-    return new_positive, True
+    return locked, True
 
 
 def apply_segment_refine(
@@ -438,6 +579,9 @@ def apply_segment_refine(
     trim_frames: int = 0,
     on_pass: RefinePassCallback | None = None,
     on_loaded: Callable[[Any], None] | None = None,
+    prev_refine_av=None,
+    prev_end_frame: int | None = None,
+    prev_tail: torch.Tensor | None = None,
 ) -> tuple[dict, str]:
     """Run optional refine/upscale second sample. Never raises — returns first-pass on failure.
 
@@ -500,6 +644,8 @@ def apply_segment_refine(
                     vae=vae,
                     refine_positive=refine_positive,
                     on_phase=on_phase,
+                    prev_refine_av=prev_refine_av,
+                    prev_end_frame=prev_end_frame,
                 )
                 note_parts.extend(extra)
                 last_ok = work
@@ -538,13 +684,15 @@ def apply_segment_refine(
                 work = _join_av(encoded, audio_latent, work)
                 if pin_frames > 0:
                     try:
-                        refine_positive, pinned = _repin_after_upscale(
+                        refine_positive, pinned, work = _repin_after_upscale(
                             refine_positive,
                             work,
                             vae=vae,
                             prefix_frames=frames,
                             trim_frames=pin_frames,
                             task_key=task_key,
+                            prev_refine_av=prev_refine_av,
+                            prev_end_frame=prev_end_frame,
                         )
                         if pinned:
                             note_parts.append(f"re-pin {pin_frames}f")
@@ -561,6 +709,11 @@ def apply_segment_refine(
                     on_phase("upscale", 1)
                 last_ok = work
 
+        # 【合并取舍】本地路线：引导+重绘的连续性由官方 Guide 关键帧提供，二采丢弃首遍
+        # 重绘掩码、只做 Guide re-pin，因此不启用上游的 continue re-lock（_relock_continue_refine
+        # 保留未调用，回退到上游路线时把下面这行改回上游的 re-lock 分支即可）。
+        continue_after_shift = None
+
         if mode == "latent_upscale":
             if on_phase:
                 on_phase("refine", 1)
@@ -576,6 +729,10 @@ def apply_segment_refine(
         sigma_steps = max(1, len(sigma_list) - 1)
         how = "sigmas wired" if wired_sigmas else f"sigma {sigma_sampler}"
         note_parts.append(f"{how} {sigma_steps}-step")
+        if pack.get("enable_tiling"):
+            tile_count = max(1, min(8, int(pack.get("tile_count") or 2)))
+            overlap = max(0, int(pack.get("tile_overlap") or 128))
+            note_parts.append(f"spatial tiles {tile_count} overlap {overlap}px")
         if refine_model is not model and sigma_steps <= 4:
             log.warning(
                 "Refine sigma pass is short. "
@@ -621,6 +778,11 @@ def apply_segment_refine(
                 sigmas=sigma_list,
                 shifted_model=shifted_refine,
                 on_loaded=on_loaded,
+                apply_shift=True,
+                after_shift=continue_after_shift,
+                enable_tiling=bool(pack.get("enable_tiling", False)),
+                tile_count=int(pack.get("tile_count") or 2),
+                tile_overlap=int(pack.get("tile_overlap") or 128),
             )
             last_ok = work
             if on_pass is not None:

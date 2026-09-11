@@ -334,6 +334,7 @@ function sanitizeSegmentForPayload(seg) {
     const {
         previewB64,
         previewFrames,
+        previewMime,
         imageB64,
         ...rest
     } = seg;
@@ -1144,7 +1145,7 @@ const STYLES = `
 .bd-seg-head{display:flex;align-items:center;justify-content:flex-start;gap:10px;flex-wrap:wrap;min-width:0}
 .bd-seg-head>b{flex-shrink:0;margin:0}
 .bd-seg-refsize{display:inline-flex;align-items:center;gap:6px;color:#c8c8c8;font-size:11px;white-space:nowrap;margin-left:auto;flex-shrink:0}
-.bd-seg-refsize select{max-width:88px}
+.bd-seg-refsize select{max-width:132px}
 .bd-seg-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;flex-shrink:0}
 .bd-seg-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff}
 .bd-seg-head .bd-meta,.bd-panel.bd-v2v-panel .bd-seg-head .bd-meta,.bd-panel.bd-rv2v-panel .bd-seg-head .bd-meta{color:#8a8a8a;font-size:11px;line-height:1.45;padding:0;min-width:0}
@@ -3098,6 +3099,9 @@ class MiniMaxH3DirectorEditor {
                         <span data-i18n="output.refImageSize.label">参考图尺寸</span>
                         <select class="bd-select" data-r="seg-ref-image-size">
                             <option value="match" data-i18n="output.refImageSize.match">match</option>
+                            <option value="1024" data-i18n="output.refImageSize.1024">最长边 1024</option>
+                            <option value="1280" data-i18n="output.refImageSize.1280">最长边 1280</option>
+                            <option value="1536" data-i18n="output.refImageSize.1536">最长边 1536</option>
                             <option value="max" data-i18n="output.refImageSize.max">max</option>
                         </select>
                     </label>
@@ -6426,6 +6430,12 @@ class MiniMaxH3DirectorEditor {
         if (!show) return;
         const seg = this.timeline.segments?.[this.selectedIndex ?? 0];
         const value = resolveSegmentRefImageSize(seg, this.timeline.output);
+        if (![...sel.options].some((o) => o.value === value)) {
+            const extra = document.createElement("option");
+            extra.value = value;
+            extra.textContent = value;
+            sel.appendChild(extra);
+        }
         sel.value = value;
         if (seg && seg.refImageSize !== value) seg.refImageSize = value;
         wrap.title = t("tooltip.refImageSize");
@@ -11917,7 +11927,8 @@ class MiniMaxH3DirectorEditor {
         this._liveSampleTotal = detail.total_steps ?? detail.totalSteps ?? null;
         this._liveSampleSeg = detail.segment_index ?? detail.segmentIndex ?? null;
 
-        const src = b64.startsWith("data:") ? b64 : `data:image/jpeg;base64,${b64}`;
+        const mime = (typeof detail.mime === "string" && detail.mime) ? detail.mime : "image/jpeg";
+        const src = b64.startsWith("data:") ? b64 : `data:${mime};base64,${b64}`;
         if (this.liveSampleImg) {
             this.liveSampleImg.src = src;
             this.liveSampleImg.classList.remove("hidden");
@@ -12900,6 +12911,7 @@ app.registerExtension({
                         live: !!detail?.live,
                         step: detail?.step,
                         total_steps: detail?.total_steps,
+                        mime: detail?.mime,
                     },
                 );
                 return;
@@ -12923,6 +12935,7 @@ app.registerExtension({
                 for (const seg of editor.timeline.segments || []) {
                     seg.previewB64 = "";
                     seg.previewFrames = [];
+                    seg.previewMime = "";
                     seg.previewLive = false;
                     seg.previewStep = null;
                     seg.previewTotalSteps = null;

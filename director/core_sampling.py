@@ -89,6 +89,9 @@ def sample_single_stage(
     after_shift=None,
     shifted_model=None,
     on_loaded: LoadedModelCallback | None = None,
+    enable_tiling: bool = False,
+    tile_count: int = 2,
+    tile_overlap: int = 128,
 ):
     import torch
     from comfy_extras.nodes_custom_sampler import (
@@ -135,6 +138,15 @@ def sample_single_stage(
 
     sampler_obj = _unpack_node_output(KSamplerSelect.execute(str(sampler_name)))[0]
     noise_obj = _unpack_node_output(RandomNoise.execute(int(seed)))[0]
+    restore_tiles = None
+    if enable_tiling:
+        from .spatial_tiled_sampling import wrap_sampler_spatial_tiles
+
+        restore_tiles = wrap_sampler_spatial_tiles(
+            sampler_obj,
+            n_tiles=tile_count,
+            overlap_pixels=tile_overlap,
+        )
 
     neg = negative if negative else []
     if _use_basic_guider(cfg, neg):
@@ -150,10 +162,8 @@ def sample_single_stage(
         )
         return _unpack_node_output(sampled)[0]
 
-    if on_step_preview is None:
-        out = _run_official()
-    else:
-        orig_sample = guider.sample
+    orig_sample = guider.sample if on_step_preview is not None else None
+    if orig_sample is not None:
         every = max(1, int(preview_every))
 
         def sample_wrapped(noise, latent_image, sampler, sigmas_in, **kwargs):
@@ -177,10 +187,13 @@ def sample_single_stage(
             return orig_sample(noise, latent_image, sampler, sigmas_in, **kwargs)
 
         guider.sample = sample_wrapped
-        try:
-            out = _run_official()
-        finally:
+    try:
+        out = _run_official()
+    finally:
+        if orig_sample is not None:
             guider.sample = orig_sample
+        if restore_tiles is not None:
+            restore_tiles()
 
     # 上报本次真正被 load_models_gpu 登记的最终 patcher（after_shift 产生的一次性
     # remask clone，或持久 shift clone）。调用方据回调把它强引用到“下一次模型加载

@@ -128,6 +128,7 @@ def segment_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor | None:
 
 
 def tensor_frame_to_jpeg_b64(frame: torch.Tensor) -> str:
+    """成片分段回放用：单帧张量压 JPEG（本地「实时预览」开启时的节点内播放）。"""
     arr = (frame.detach().cpu().clamp(0, 1).numpy() * 255).astype("uint8")
     img = Image.fromarray(arr)
     buf = io.BytesIO()

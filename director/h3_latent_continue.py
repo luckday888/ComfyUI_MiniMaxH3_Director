@@ -40,8 +40,8 @@ CONTINUE_PIPELINE_ID = "minimax_h3_latent_continue_v4"
 PREFIX_STEPS_KEY = "_director_continue_prefix_steps"
 CONTINUE_SEAM_KEY = "_director_continue_seam_min"
 SEAM_TAPER_TOKENS = 4
-# H3 pins mask=0 rows at VISUAL_COND_TIMESTEP (official Guide). Sampler also
-# copies latent_image 100% where mask=0. Continue must stay above that floor.
+# 0 = hard-copy the seam tokens (sampler keeps latent_image). H3 also treats
+# mask=0 as VISUAL_COND_TIMESTEP; that is what「重绘幅度 0」asks for.
 SEAM_MIN_MASK = 0.65
 SEAM_FLOOR_MIN = 0.40
 SEAM_FLOOR_MAX = 0.95
@@ -65,7 +65,7 @@ def prefix_token_weights(
     taper_steps: int = SEAM_TAPER_TOKENS,
     seam_min: float | None = None,
 ) -> tuple[float, ...]:
-    """1.0 on the disposable head, taper toward seam_min — never 0."""
+    """1.0 on the disposable head, taper toward seam_min (0 = hard-lock seam)."""
     n = int(prefix_steps)
     if n < 1:
         return ()
@@ -399,11 +399,13 @@ class _PrefixRemask:
         current = float(torch.as_tensor(sigma).detach().float().reshape(-1)[0])
         schedule = self.sigmas or _schedule_values((extra_options or {}).get("sigmas", ()))
         ratio = _next_sigma_ratio(current, schedule)
-        # Head stays fully open. Seam follows sigma but never drops to cond-pin.
+        # Head stays fully open. Seam follows sigma, floored at the user seam.
         live = []
         for base in prefix_token_weights(self.prefix_steps, seam_min=self.seam_min):
             if base >= 0.999:
                 live.append(1.0)
+            elif self.seam_min <= 0.0:
+                live.append(max(0.0, float(base) * max(float(ratio), 0.0)))
             else:
                 live.append(max(self.seam_min, float(base) * max(float(ratio), 0.5)))
         return torch.tensor(live, dtype=torch.float32)
