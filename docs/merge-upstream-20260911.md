@@ -197,6 +197,10 @@ git 自动合并留下的不一致，已修正，回退时注意别再踩：
 6. **行尾被脚本改坏**：批量改写脚本把 6 个原本 CRLF 的文件（`h3_latent_continue.py`、
    `h3_motion_context.py`、`plan.py`、`refine_sampling.py`、`segment_continuity.py`、
    `segment_runtime.py`）转成了 LF，导致整文件 diff。已全部还原为 CRLF，与本地一致。
+7. **`_prune_continuity_working_set` 参数不匹配**（真机验证 2026-09-11 第一轮暴露）：
+   合并给调用点加了 `completed_first_pass_av`（上游 `14fdcd6` 的一采 AV 工作集）成为 4 参调用，
+   但函数定义仍是本地 3 参 → `TypeError: takes 3 positional arguments but 4 were given`。
+   已把函数扩为 4 参并将 first_pass_av 一并按「只留 N-1」规则裁剪。
 
 ---
 
