@@ -33,6 +33,9 @@ SOURCE_VIDEO_FP_KEY = "source_video"
 # 以便 prune 能把“移位后的旧位置文件”认领到当前段，而不是误删。
 _SEG_ID_SANITIZE_RE = re.compile(r"[^0-9A-Za-z_-]+")
 
+# 运行 seed 历史记录文件名（追加写，永不随缓存清理删除）
+SEED_LOG_NAME = "seeds.log"
+
 # 最终组 / 一采组磁盘后缀
 SFX_FINAL_FRAMES = ".pt"
 SFX_FINAL_META = ".meta.json"
@@ -92,6 +95,34 @@ def _resolve_stem(
             if (root / f"{stem}{suffix}").is_file():
                 return stem
     return candidates[0]
+
+
+def record_run_seed(node_id: str | None, seed: int, *, detail: dict[str, Any] | None = None) -> None:
+    """把本次运行的 seed 追加写入 ``minimax_seg_cache/<node_id>/seeds.log``。
+
+    每次开始运行（无论最终成功或失败）都记录一行 JSONL：
+    ``{"time": ..., "seed": ..., ...}``。该文件不属于段缓存，
+    ``prune_segment_cache`` / ``clear_segment_cache`` 均不得删除，永久保留。
+    Never raises.
+    """
+    if not node_id:
+        return
+    root = _cache_root(node_id)
+    if root is None:
+        return
+    try:
+        from datetime import datetime
+
+        entry: dict[str, Any] = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "seed": int(seed),
+        }
+        if isinstance(detail, dict):
+            entry.update(detail)
+        with (root / SEED_LOG_NAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception as exc:
+        log.debug("Run seed log write skipped (%s).", exc)
 
 
 def _reject_owner_mismatch(stored: Any, seg: SegmentPlan) -> bool:
@@ -1038,6 +1069,9 @@ def prune_segment_cache(node_id: str | None, valid_segments) -> None:
         for path in sorted(root.iterdir()):
             if not path.is_file():
                 continue
+            if path.name == SEED_LOG_NAME:
+                # 运行 seed 历史永久保留，不参与段缓存清理。
+                continue
             stem = _split_cache_stem(path.name)
             if stem is None:
                 continue
@@ -1241,6 +1275,9 @@ def clear_segment_cache(node_id: str | None, kind: str = "final") -> int:
             if not path.is_file():
                 continue
         except OSError:
+            continue
+        if path.name == SEED_LOG_NAME:
+            # 运行 seed 历史永久保留，不随任何缓存清理删除。
             continue
         is_pre = ".pre." in path.name
         if kind == "first_pass" and not is_pre:
