@@ -221,3 +221,73 @@ git 自动合并留下的不一致，已修正，回退时注意别再踩：
 3. **实时预览**：WebP 循环预览 + 音频预览 + 成片整段回放三者是否同时工作、开关能否运行中切换。
 4. **段缓存**：nanosecond mtime + `stable_seg_id` 指纹换代后，旧缓存应整体失效而非误命中。
 5. **分段导出**（`3cea821`）：Linux 下不再出空目录。
+
+---
+
+## 六、第二轮合并（2026-09-14，`9117ded`，上游 2 提交）
+
+上游提交：
+
+| commit | 说明 |
+| --- | --- |
+| `19b6a73` | 复用 SigmaShift clone 并清掉段间死槽，治 MiniMaxH3 显存泄漏 |
+| `52f8fb7` | 段间引导低频光色对齐改批量 GPU，1080p 段 427s → 0.37s |
+
+### 6.1 路线决策：SigmaShift 泄漏治理 —— 本地（用户拍板，三问全取本地）
+
+`19b6a73` 与本地是**同一问题的两套互斥方案**：
+
+- **上游**：每次 execute 建 `ShiftedModelCache`，采样 finally 里把 `guider/noise_obj/sampler_obj/model_use`
+  全部置 `None`，再用 `_evict_dead_loaded_models` 强掏 `is_dead()` 的 current_loaded_models 槽。
+- **本地**：进程级持久 clone（`get_persistent_shifted_model`）+ `on_loaded` 滚动槽注册 +
+  存活期 `mm.unload_model_and_clones` 卸载 + `restore_persistent_model_registration` 恢复注册。
+
+互斥点：上游 finally 的 `model_use=None` 会让本地 `on_loaded(model_use)` 回调恒收到 `None`，
+滚动槽机制直接失效，故不能只取片段，只能二选一。**取本地**。
+
+4 处冲突全部取本地：
+
+1. `director/executor_core.py` import 行（本地持久 clone/vram 工具集）。
+2. `director/executor_core.py` 节点报告文案（保留本地音频预览行）。
+3. `director/executor_core.py` 一采采样调用：`shifted_model=_get_main_shifted(), on_loaded=_on_loaded,`。
+4. `director/executor_core.py` 收尾：`restore_persistent_model_registration(persistent_shifted, held_loaded_model)`。
+
+同时删除 git 自动并入的上游零件，否则引用悬空/行为冲突：
+
+- `director/core_sampling.py`：`ShiftedModelCache` 类、`shift_cache` 形参、finally 块里的
+  `uninstall_continue_prefix_remask(model)` 与 `guider/noise_obj/sampler_obj/model_use=None`
+  置空（本地 finally 只还原 `guider.sample` 与 tiles，紧接的 `on_loaded(model_use)` 必须收到活 patcher）。
+- `director/refine_sampling.py`：`shift_cache=None` 形参与调用透传。保留本地
+  `continue_after_shift = None`（不启用上游 `_relock_continue_refine`）。
+- `director/executor_core.py`：refine 调用点自动并入的 `shift_cache=shift_cache`。
+- `director/vram_cleanup.py`：整文件取本地，净改动为零（保留
+  `cleanup_segment_vram(*, enabled, unload_models, models=())` 与
+  `restore_persistent_model_registration`，不要上游 `_evict_dead_loaded_models`/`cleanup_models_gc`）。
+
+> 回退到上游路线：四处冲突改取上游，并整体还原 `core_sampling.py` 的 `ShiftedModelCache` 与 finally
+> 置空、`vram_cleanup.py` 的死槽强掏；必须成组切换，不能混用。
+
+### 6.2 无冲突吸收：grade 批量化（`52f8fb7`）
+
+- `director/segment_continuity.py`：新增 `_grade_device()`（读环境变量 `H3_DIRECTOR_GRADE_DEVICE`：
+  `cpu`/`off`/`0` 强制 CPU，否则 cuda 可用时走 GPU）、`_grade_pull_batched()`（guide 模糊提循环外 +
+  批量 `avg_pool2d`），`match_export_opening_grade` 改调批量路径，异常时回退 `_grade_pull_cpu`。
+  权重公式与逐帧参考实现完全不变（`w_i = weight0*(1-i/n)`，`w<=1e-4` early-break）。
+- `director/h3_latent_continue.py`：吸收上游新增的 `uninstall_continue_prefix_remask(model)`
+  工具函数（清 `_director_continue_remask` state / `denoise_mask_function` / APPLY_MODEL wrapper），
+  本地路线不调用；`SEAM_MIN_MASK=0.65`、`SEAM_FLOOR_MIN=0.40` 维持本地值。
+- 坏点：`director/refine_sampling.py` 合并后再次被脚本转成 LF，已还原 CRLF（与第一次合并坏点 6 同类）。
+
+> 出问题即时回退旧路径：环境变量设 `H3_DIRECTOR_GRADE_DEVICE=cpu`（无需改代码）。
+
+### 6.3 验证结果（cloudstudio，Tesla T4 14.9GB）
+
+- `pytest`：11/11 通过。
+- grade CPU/GPU 等价（`tmp/h3_grade_equiv.py`，1080p/单帧/小尺寸/非整除 × blur 3/9/31 + env 切换 +
+  early-break）：13/13 通过，批量路径与旧逐帧参考 **maxdiff=0.000e+00（bit 级一致）**；
+  1080p 实测旧逐帧 CPU 27.31s / 批量 GPU 0.355s。
+- 段间引导真机（`h3_verify_driver.py`，4 次 runSelection 共 4 段全新采样）：4/4 success，
+  缓存接续/存活/prune/新写 9/9 ALL PASS。
+- 参考音频 lazy 真机（`h3_audio_verify.py`，新稳定段 id 强制全程重采样，2 段）：
+  2/2 success，双有效音频/伪 mp3 解码失败/坏槽剔除/标签不发模型/双 mp4 含 AAC 6/6 ALL PASS。
+
