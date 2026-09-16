@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Any
 
 import torch
@@ -925,6 +926,49 @@ def _blur_hwc(frame: torch.Tensor, kernel: int) -> torch.Tensor:
     return t.squeeze(0).permute(1, 2, 0)
 
 
+def _grade_device() -> torch.device:
+    """Device for the export opening grade.
+
+    The grade is a per-pixel box blur plus an elementwise lerp. Neither couples
+    a pixel to any other frame or to its neighbours' ordering, so the GPU
+    reproduces the CPU numbers to float32 rounding while turning a twelve frame
+    pass from minutes into milliseconds. ``H3_DIRECTOR_GRADE_DEVICE=cpu`` forces
+    the original CPU path (useful for A/B or when VRAM is tight).
+    """
+    forced = os.environ.get("H3_DIRECTOR_GRADE_DEVICE", "").strip().lower()
+    if forced in {"cpu", "off", "0"}:
+        return torch.device("cpu")
+    try:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+    except Exception:
+        pass
+    return torch.device("cpu")
+
+
+def _box_blur_bhwc(
+    frames: torch.Tensor, kernel: int, device: torch.device
+) -> torch.Tensor:
+    """Batch form of :func:`_blur_hwc` — same reflect pad, same box kernel.
+
+    ``avg_pool2d`` is independent per sample, so blurring N frames in one call
+    on one device is identical to blurring them one at a time.
+    """
+    k = int(kernel)
+    if k < 3:
+        return frames.detach().to(device=device, dtype=torch.float32)
+    if k % 2 == 0:
+        k += 1
+    x = frames.detach().to(device=device, dtype=torch.float32)
+    if x.dim() == 3:
+        x = x.unsqueeze(0)
+    t = x.permute(0, 3, 1, 2)
+    pad = k // 2
+    t = torch.nn.functional.pad(t, (pad, pad, pad, pad), mode="reflect")
+    t = torch.nn.functional.avg_pool2d(t, kernel_size=k, stride=1)
+    return t.permute(0, 2, 3, 1)
+
+
 def _lowfreq_appearance_pull(
     src: torch.Tensor,
     guide: torch.Tensor,
@@ -951,6 +995,50 @@ def _lowfreq_appearance_pull(
     return out.clamp(0.0, 1.0).to(dtype=src.dtype)
 
 
+def _grade_pull_cpu(
+    out: torch.Tensor,
+    last: torch.Tensor,
+    weights: list,
+    blur: int,
+) -> None:
+    """Reference path: frame at a time on the CPU, one blur per frame.
+
+    Kept verbatim as the fallback so a GPU-less or VRAM-starved run still
+    produces the same pixels it always did.
+    """
+    for i, w in enumerate(weights):
+        out[i] = _lowfreq_appearance_pull(out[i], last, weight=w, blur=blur)
+
+
+def _grade_pull_batched(
+    out: torch.Tensor,
+    last: torch.Tensor,
+    weights: list,
+    blur: int,
+) -> None:
+    """Same grade, but the guide is blurred once and the frames in one batch.
+
+    ``_lowfreq_appearance_pull`` recomputed the guide blur on every frame even
+    though ``guide[-1]`` never changes, and ran every box blur on the CPU. Both
+    fixes are arithmetic-neutral: the guide term is hoisted out of the loop, and
+    the per-frame blurs become a single batched ``avg_pool2d`` on the GPU.
+    """
+    cnt = len(weights)
+    device = _grade_device()
+    src = out[:cnt]
+    g = last
+    if g.dim() == 4:
+        g = g[0]
+    if tuple(g.shape[:2]) != tuple(src.shape[1:3]):
+        g = fit_canvas(g.unsqueeze(0), int(src.shape[2]), int(src.shape[1]))[0]
+    b_guide = _box_blur_bhwc(g.unsqueeze(0), blur, device)[0]
+    b_src = _box_blur_bhwc(src, blur, device)
+    w = torch.tensor(weights, device=device, dtype=torch.float32).view(-1, 1, 1, 1)
+    s = src.detach().to(device=device, dtype=torch.float32)
+    res = (s + w * (b_guide.unsqueeze(0) - b_src)).clamp_(0.0, 1.0)
+    out[:cnt] = res.to(device=out.device, dtype=out.dtype)
+
+
 def match_export_opening_grade(
     body: torch.Tensor,
     guide: torch.Tensor,
@@ -963,6 +1051,9 @@ def match_export_opening_grade(
 
     Uses low-frequency residual only so pose edges are not copied (no 重影).
     Applied on per-segment exports because concat seam soften never runs there.
+
+    The weights, the low-frequency residual and the clamp are unchanged from the
+    frame-at-a-time version; only where and how often the blurs run changed.
     """
     if (
         body is None
@@ -976,12 +1067,27 @@ def match_export_opening_grade(
         return body
     n = min(int(frames), int(body.shape[0]))
     last = guide[-1]
-    out = body.clone()
+    # The reference loop breaks at the first weight <= 1e-4, leaving the frames
+    # past that point untouched. Collect the same prefix up front.
+    weights: list = []
     for i in range(n):
         w = float(weight0) * (1.0 - float(i) / float(n))
         if w <= 1e-4:
             break
-        out[i] = _lowfreq_appearance_pull(out[i], last, weight=w, blur=int(blur))
+        weights.append(w)
+
+    out = body.clone()
+    if weights:
+        try:
+            _grade_pull_batched(out, last, weights, int(blur))
+        except Exception as exc:  # no CUDA / OOM / driver surprise
+            log.warning(
+                "Segment continuity: export opening grade fell back to CPU "
+                "(%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+            _grade_pull_cpu(out, last, weights, int(blur))
     log.info(
         "Segment continuity: export opening grade %df weight=%.2f blur=%d",
         n,
