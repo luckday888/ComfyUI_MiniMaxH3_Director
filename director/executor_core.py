@@ -399,6 +399,7 @@ def _prune_continuity_working_set(
     next_segment_index: int,
     av_latents: dict[int, dict],
     first_pass_av: dict[int, dict],
+    low_carry: dict[int, dict],
     refine_passes: dict[int, list[tuple[str, torch.Tensor]]],
 ) -> None:
     """Keep only the direct predecessor the next segment's continuity can read.
@@ -408,11 +409,12 @@ def _prune_continuity_working_set(
     Final/pre-refine frames, export audio and handoff metadata live in separate
     collections and are intentionally left untouched. 一采 AV（``first_pass_av``，
     供 Refine 改画幅后的同尺寸钉图 select_continuity_pin_latent 使用）同样是
-    滚动工作集，一并裁剪。
+    滚动工作集，一并裁剪。SelfLift 原生低清 carry（``low_carry``）亦为按段滚动
+    工作集，同规则裁剪。
     """
     current = int(next_segment_index)
     keep = current - 1
-    for working_set in (av_latents, first_pass_av, refine_passes):
+    for working_set in (av_latents, first_pass_av, low_carry, refine_passes):
         for index in tuple(working_set):
             if int(index) < current and int(index) != keep:
                 working_set.pop(index, None)
