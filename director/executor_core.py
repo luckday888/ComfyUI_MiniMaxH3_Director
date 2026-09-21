@@ -2139,6 +2139,24 @@ def execute_director_plan_core(
         fallback = torch.full((1, 1, 1, 3), 0.5)
         combined = group_chunks[-1] if group_chunks else fallback
         pre_combined = group_pre[-1] if group_pre else combined
+        # FaceRefine 修脸前输出：与上方分组规则保持一致，逐组 concat
+        if export_pre_face_refine:
+            group_pre_face: list[torch.Tensor] = []
+            for pos_group in groups:
+                idx_group = [int(run_list[p]) for p in pos_group]
+                segs = [all_segments[idx] for idx in idx_group]
+                face_chunks = [
+                    export_pre_face_chunks[p]
+                    if p < len(export_pre_face_chunks)
+                    else export_chunks[p]
+                    for p in pos_group
+                ]
+                group_pre_face.append(concat_continuous_chunks(face_chunks, segs, plan))
+            segment_pre_face = group_pre_face
+            pre_face_combined = group_pre_face[-1] if group_pre_face else combined
+        else:
+            pre_face_combined = None
+            segment_pre_face = []
         reports.append(
             "Export mode: selection — merged consecutive selected segments into "
             f"{len(group_chunks)} clip(s): {', '.join(group_desc)}."
