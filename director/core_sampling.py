@@ -16,6 +16,7 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core_sampling")
 PhaseCallback = Callable[[str, float], None]
 StepPreviewCallback = Callable[[int, int, Any], None]
 LoadedModelCallback = Callable[[Any], None]
+StepStateCallback = Callable[[int, int, Any, Any], None]
 
 
 # ── 进程级 SigmaShift clone 复用 ────────────────────────────────────────────
@@ -47,6 +48,75 @@ def get_persistent_shifted_model(base, shift_video: float, shift_audio: float):
     while len(_SHIFT_CLONE_CACHE) > _SHIFT_CLONE_MAX:
         _SHIFT_CLONE_CACHE.popitem(last=False)
     return model_use
+
+
+class ShiftedModelCache:
+    """运行级 SigmaShift 句柄（SelfLift / executor 使用），兼容上游接口。
+
+    真正的 clone 统一由进程级 ``_SHIFT_CLONE_CACHE`` 保活（见
+    ``get_persistent_shifted_model``）。本类只记录本次运行借出了哪些 clone：
+    ``clear()`` 仅清运行句柄引用，不碰持久缓存，保证跨段/跨运行的 is_dead
+    修复继续生效。
+    """
+
+    def __init__(self) -> None:
+        self._items: list[Any] = []
+
+    def get(self, model, shift_video: float, shift_audio: float):
+        model_use = get_persistent_shifted_model(
+            model, float(shift_video), float(shift_audio)
+        )
+        if not any(item is model_use for item in self._items):
+            self._items.append(model_use)
+        return model_use
+
+    def holds(self, model) -> bool:
+        return any(item is model for item in self._items)
+
+    def clear(self) -> None:
+        # 只释放运行句柄；持久 clone 继续由 _SHIFT_CLONE_CACHE 跨运行保活
+        self._items.clear()
+
+
+class _FixedNoise:
+    """Resume helper: return a precomputed NestedTensor / tensor as sampler noise."""
+
+    def __init__(self, noise, seed: int = 0) -> None:
+        self.seed = int(seed or 0)
+        self._noise = noise
+
+    def generate_noise(self, input_latent):
+        del input_latent
+        return self._noise
+
+
+class _ZeroNoise:
+    """Resume helper: SamplerCustomAdvanced still calls generate_noise()."""
+
+    def __init__(self) -> None:
+        self.seed = 0
+
+    def generate_noise(self, input_latent):
+        import torch
+
+        samples = input_latent["samples"] if isinstance(input_latent, dict) else input_latent
+        # torch.Tensor.unbind splits the batch axis — only NestedTensor is AV streams.
+        if torch.is_tensor(samples):
+            return torch.zeros_like(samples)
+        if getattr(samples, "is_nested", False) and hasattr(samples, "unbind"):
+            parts = tuple(torch.zeros_like(p) for p in samples.unbind())
+            try:
+                import comfy.nested_tensor
+
+                return comfy.nested_tensor.NestedTensor(parts)
+            except Exception:
+                try:
+                    return type(samples)(parts)
+                except Exception:
+                    return parts
+        if isinstance(samples, (tuple, list)):
+            return type(samples)(torch.zeros_like(p) for p in samples)
+        raise TypeError(f"Cannot build zero noise for {type(samples)!r}")
 
 
 def _unpack_node_output(out):
@@ -92,6 +162,11 @@ def sample_single_stage(
     enable_tiling: bool = False,
     tile_count: int = 2,
     tile_overlap: int = 128,
+    # SelfLift 运行级缓存（句柄内部仍委托进程级持久缓存）
+    shift_cache: ShiftedModelCache | None = None,
+    on_step_state: StepStateCallback | None = None,
+    zero_noise: bool = False,
+    noise_override=None,
 ):
     import torch
     from comfy_extras.nodes_custom_sampler import (
@@ -137,7 +212,12 @@ def sample_single_stage(
             model_use = remasked
 
     sampler_obj = _unpack_node_output(KSamplerSelect.execute(str(sampler_name)))[0]
-    noise_obj = _unpack_node_output(RandomNoise.execute(int(seed)))[0]
+    if noise_override is not None:
+        noise_obj = _FixedNoise(noise_override, seed=int(seed or 0))
+    elif zero_noise:
+        noise_obj = _ZeroNoise()
+    else:
+        noise_obj = _unpack_node_output(RandomNoise.execute(int(seed)))[0]
     restore_tiles = None
     if enable_tiling:
         from .spatial_tiled_sampling import wrap_sampler_spatial_tiles
@@ -162,7 +242,9 @@ def sample_single_stage(
         )
         return _unpack_node_output(sampled)[0]
 
-    orig_sample = guider.sample if on_step_preview is not None else None
+    orig_sample = (
+        guider.sample if (on_step_preview is not None or on_step_state is not None) else None
+    )
     if orig_sample is not None:
         every = max(1, int(preview_every))
 
@@ -170,14 +252,20 @@ def sample_single_stage(
             inner_cb = kwargs.get("callback")
 
             def callback(step, x0, x, total_steps):
+                if on_step_state is not None:
+                    try:
+                        on_step_state(int(step), int(total_steps), x0, x)
+                    except Exception as exc:
+                        log.debug("Step state callback skipped: %s", exc)
                 try:
-                    last = max(0, int(total_steps) - 1)
-                    if int(preview_every) < 0:
-                        show = step >= last
-                    else:
-                        show = step % every == 0 or step >= last
-                    if show:
-                        on_step_preview(int(step), int(total_steps), x0)
+                    if on_step_preview is not None:
+                        last = max(0, int(total_steps) - 1)
+                        if int(preview_every) < 0:
+                            show = step >= last
+                        else:
+                            show = step % every == 0 or step >= last
+                        if show:
+                            on_step_preview(int(step), int(total_steps), x0)
                 except Exception as exc:
                     log.debug("Step preview callback skipped: %s", exc)
                 if inner_cb is not None:

@@ -24,6 +24,8 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 | **External multi-group inputs** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`; wire into `i2v_groups` / `r2v_groups` for external-priority batches with run-select |
 | **Native stereo audio** | Generated with the picture; `v2v`/`rv2v` can generate / keep source / mute |
 | **Segment continuity** | Off by default. For multi-segment `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v`, pin the previous generated tail (motion + generated audio) into the next sample, then trim the prefix. Context frames: 5 / 22 / 39 / 56 — **recommended default: 22**. When on, each segment keeps the model's full generated tail (due to the 17k+5 frame grid, each guided segment runs ~0.5s longer than its UI nominal duration) so sentence-final syllables / fade-out are not clipped. **Thanks to [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) for the implementation approach** |
+| **Semantic Bridge** | Wire **MiniMax H3 Director Semantic Bridge** into Director `semantic_bridge` (above SelfLift). Unconnected = identical. Connected = rewrite official cond tokens with the student MLP (RMS-norm → residual mix). Put weights in `models/semantic_bridge/` yourself — this plugin does not ship them. Switch adapters in the node to pick original vs BUNNY; do not chain two bridges. Original leans static relations (layout / space / counting); BUNNY leans action ownership and multi-character scenes. Distilled on FL2VA; `r2v` / `v2v` / `rv2v` is forced-compat — use with care. See [speach1sdef178/MiniMax-H3-Semantic-Bridge](https://huggingface.co/speach1sdef178/MiniMax-H3-Semantic-Bridge) and [JOKER141/BUNNY_H3_Conditioning_Bridge](https://huggingface.co/JOKER141/BUNNY_H3_Conditioning_Bridge) |
+| **SelfLift (progressive first pass)** | Wire **MiniMax H3 Director SelfLift** into Director `selflift` (above Refine). Unconnected = original single-stage first pass. Connected = low-res prefix + 3D lift + high-res tail on the Director canvas. Euler only. **Thanks to [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) for the implementation approach** |
 | **Refine / upscale** | Wire **MiniMax H3 Director Refine** into Director `refine`. Unconnected = original single-pass sampling. `refine` = same-resolution second sample; `upscale` = enlarge to a target canvas then SIGMAS sample (pixel / RTX VSR / H3 latent); `latent_upscale` = H3 latent enlarge only, no second sample. `passes` repeats refine (upscale once). Optional `refine_model` swaps the second-pass UNET. `images` is the refined clip; `images_pre_refine` is the first pass (before upscale) |
 | **Stable multi-segment VRAM** | All segments reuse one copy of the MiniMaxH3 weights and a single SigmaShift model wrapper (no per-segment weight copies or disk reloads); the one-off redraw wrapper used by segment continuity is released by ComfyUI on the next load, avoiding the `memory leak with model MiniMaxH3` false-positive spam and stale load-registry entries when orchestrating many samples inside one node. The model stays resident by default for speed; turn on between-segment VRAM clearing to unload cleanly (while the patcher is still alive) and auto-reload for the next segment |
 | **Run report** | `report` output with plan and per-segment summary |
@@ -34,7 +36,7 @@ Reference-audio slots can select an existing video or a local audio/video file. 
 ### Inputs / outputs
 
 **Inputs:** `model` → `video_vae` → `audio_vae` → `clip`  
-**Optional:** `i2v_groups` (Image to Video packs) / `r2v_groups` (Reference to Video packs) / `refine` (`MiniMax H3 Director Refine`)
+**Optional:** `i2v_groups` (Image to Video packs) / `r2v_groups` (Reference to Video packs) / `semantic_bridge` (`MiniMax H3 Director Semantic Bridge`) / `selflift` (`MiniMax H3 Director SelfLift`) / `refine` (`MiniMax H3 Director Refine`)
 
 **Outputs:** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report` → `images_pre_refine`
 
@@ -228,6 +230,9 @@ Mirror the two official conditioning nodes and feed **multi-group** batches into
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — weights & docs
 - [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — inspiration for cross-segment motion/audio continuation
 - [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent upscaler architecture and checkpoint format
+- [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) — inspiration for SelfLift progressive first-pass sampling
+- [speach1sdef178/MiniMax-H3-Semantic-Bridge](https://huggingface.co/speach1sdef178/MiniMax-H3-Semantic-Bridge) — Semantic Bridge student formula and adapter format
+- [JOKER141/BUNNY_H3_Conditioning_Bridge](https://huggingface.co/JOKER141/BUNNY_H3_Conditioning_Bridge) — same-architecture action-logic / multi-character adapter
 
 ## License
 
