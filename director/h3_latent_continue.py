@@ -39,6 +39,9 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.h3_latent_continue")
 CONTINUE_PIPELINE_ID = "minimax_h3_latent_continue_v4"
 PREFIX_STEPS_KEY = "_director_continue_prefix_steps"
 CONTINUE_SEAM_KEY = "_director_continue_seam_min"
+# SelfLift 掩码融合标记：存在时 remask 的 head token 硬锁 0（只让 taper 区部分重绘），
+# 否则动态 remask 会把 SelfLift 的静态 keep-mask 全部覆盖，接缝锚点失效。
+SELFLIFT_FUSE_KEY = "_director_selflift_mask_fuse"
 SEAM_TAPER_TOKENS = 4
 # 0 = hard-copy the seam tokens (sampler keeps latent_image). H3 also treats
 # mask=0 as VISUAL_COND_TIMESTEP; that is what「重绘幅度 0」asks for.
@@ -389,12 +392,15 @@ class _PrefixRemask:
         video_shape: tuple[int, ...],
         seam_min: float | None = None,
         audio_shape: tuple[int, ...] | None = None,
+        selflift_fuse: bool = False,
     ):
         self.prefix_steps = int(prefix_steps)
         self.sigmas = _schedule_values(sigmas)
         self.video_shape = tuple(int(x) for x in video_shape)
         self.audio_shape = tuple(int(x) for x in audio_shape) if audio_shape else None
         self.seam_min = clamp_seam_min_mask(SEAM_MIN_MASK if seam_min is None else seam_min)
+        # SelfLift 融合：head token 硬锁，taper token 保留部分重绘
+        self.selflift_fuse = bool(selflift_fuse)
         self.current_video_mask: torch.Tensor | None = None
         self.current_audio_mask: torch.Tensor | None = None
 
@@ -409,6 +415,13 @@ class _PrefixRemask:
             if floor > 0.0:
                 value = max(floor, value)
             live.append(max(0.0, min(1.0, value)))
+        if self.selflift_fuse:
+            # Head token（taper 之前）硬锁 0：native low carry / 高清 pin 成为真实锚点；
+            # 接缝附近的 taper token 仍按 floor 部分重绘，保留重绘的平滑桥接。
+            taper = max(1, min(SEAM_TAPER_TOKENS, self.prefix_steps))
+            head_n = self.prefix_steps - taper
+            for i in range(head_n):
+                live[i] = 0.0
         return torch.tensor(live, dtype=torch.float32)
 
     def _sync_shapes(self, extra_options=None) -> None:
@@ -508,19 +521,22 @@ def install_continue_prefix_remask(model, latent: dict, sigmas) -> Any:
             log.warning("Director continue: MODEL has no denoise-mask hook; static mask only.")
             return model
         audio_shape = tuple(streams[1].shape) if len(streams) > 1 and torch.is_tensor(streams[1]) else None
+        selflift_fuse = bool(isinstance(latent, dict) and latent.get(SELFLIFT_FUSE_KEY))
         state = _PrefixRemask(
             prefix_steps,
             sigmas,
             tuple(streams[0].shape),
             seam_min=_seam_min_from_latent(latent),
             audio_shape=audio_shape,
+            selflift_fuse=selflift_fuse,
         )
         patched.set_model_denoise_mask_function(state.denoise_mask_function)
         log.info(
-            "Director continue remask: prefix=%d seam_min=%.2f "
+            "Director continue remask: prefix=%d seam_min=%.2f%s "
             "(whole prefix × next/current σ, last token stays at floor)",
             prefix_steps,
             float(state.seam_min),
+            " SelfLift融合(head硬锁/taper重绘)" if selflift_fuse else "",
         )
         try:
             from comfy.patcher_extension import WrappersMP
