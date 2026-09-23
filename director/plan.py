@@ -293,10 +293,13 @@ class DirectorPlan:
     raw: dict
     source_total_frames: int = 0
     export_max_frames: int = 0
-    export_mode: str = "all"  # "all" | "segments"
+    export_mode: str = "all"  # "all" | "segments" | "selection"
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
+    # 接缝处音频接续：False 时视频仍按运动上下文拼接，但各段保留自己的音频
+    # （接缝硬切）。默认 True（兼容旧行为）
+    audio_continuity_enabled: bool = True
     # 段间引导伴生：开环、仅作用于导出像素的曝光锚定，把各段亮度漂移拉回首段
     # 曝光基准；不触碰 latent/音频，原生 latent pin 不受影响
     exposure_anchor_enabled: bool = True
@@ -331,6 +334,9 @@ class DirectorPlan:
     external_groups_witness: dict | None = None
     # Set during execute when export_mode=segments (minimax_seg_export folder).
     segment_mp4_run_dir: str | None = None
+    # export_mode=selection 时由执行器写入：连续勾选段组列表，每组为 run_list
+    # 位置序列，每组产出一条合并成片；音频构建按组拼接
+    selection_export_groups: list | None = None
 
     @property
     def segment_count(self) -> int:
@@ -687,6 +693,8 @@ def _resolve_export_mode(output_block: dict) -> str:
     mode = str(output_block.get("exportMode") or output_block.get("export_mode") or "all").lower()
     if mode in ("segments", "segment", "per_segment", "by_segment"):
         return "segments"
+    if mode in ("selection", "selected", "select", "merge_selection", "by_selection"):
+        return "selection"
     return "all"
 
 
@@ -951,6 +959,7 @@ def build_director_plan(
         )
 
     from .segment_continuity import (
+        resolve_audio_continuity_enabled,
         resolve_continuity_keep_tail,
         resolve_continuity_mode,
         resolve_continuity_redraw,
@@ -963,6 +972,7 @@ def build_director_plan(
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
+    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
     exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     continuity_mode = resolve_continuity_mode(timeline)
@@ -999,6 +1009,7 @@ def build_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
+        audio_continuity_enabled=audio_continuity_enabled,
         continuity_mode=continuity_mode,
         continuity_redraw=continuity_redraw,
         continuity_keep_tail=continuity_keep_tail,

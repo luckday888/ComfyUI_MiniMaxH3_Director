@@ -340,6 +340,25 @@ def _prune_continuity_working_set(
                 working_set.pop(index, None)
 
 
+def _consecutive_index_groups(run_list: list[int]) -> list[list[int]]:
+    """把有序段索引切分为最大连续段组。
+
+    返回的是 run_list 的*位置*组（与 run-order chunk / 音频列表对齐），不是段
+    索引。如 run indices [0,1,3,4,6] → [[0,1],[2,3],[4]]——三条成片（段1-2合并、
+    段4-5合并、段7）。
+    """
+    groups: list[list[int]] = []
+    current: list[int] = []
+    for pos, idx in enumerate(run_list):
+        if current and int(idx) != int(run_list[pos - 1]) + 1:
+            groups.append(current)
+            current = []
+        current.append(pos)
+    if current:
+        groups.append(current)
+    return groups
+
+
 def _poster_frame(tensor: torch.Tensor | None) -> torch.Tensor:
     """1-frame stand-in so IMAGE list length stays valid after a pixel release."""
     if not isinstance(tensor, torch.Tensor) or tensor.ndim != 4 or int(tensor.shape[0]) <= 0:
@@ -638,6 +657,7 @@ def execute_director_plan_core(
     # replaces older IMAGE slots with 1-frame posters.
     segment_export_lengths: dict[int, int] = {}
     export_segments_mode = plan.export_mode == "segments"
+    export_selection_mode = plan.export_mode == "selection"
 
     def _run_one_segment(
         seg, *, progress_index: int
@@ -924,8 +944,11 @@ def execute_director_plan_core(
         if use_motion_context:
             # Pin audio from previous AV latent whenever available.
             # Do not gate on decode_audio — mute only skips final audio decode.
+            # audio_continuity_enabled=False：视频仍按运动上下文拼接，但各段保留
+            # 自己的音频（接缝硬切）
             pin_audio = (
                 audio_mode != AUDIO_MODE_MUTE
+                and getattr(plan, "audio_continuity_enabled", True)
                 and (prev_av is not None or prev_audio is not None)
             )
             prev_av = select_continuity_pin_latent(latent, prev_first_pass_av, prev_av)
@@ -1993,6 +2016,40 @@ def execute_director_plan_core(
         reports.append(
             "Export mode: segments — released prior-segment pixels after mp4 "
             "and continuity pin (no full-timeline concat)."
+        )
+    elif export_selection_mode:
+        # 选择导出：每个最大连续勾选段组合并为一条成片，不连续组拆分为多条。
+        # images 列表（每组一个合并 tensor）自然驱动 CreateVideo/SaveVideo 按组
+        # 各出一条视频。未勾选段不进结果（其缓存在 _run_one_segment 内仍可被
+        # continuity pin 读取）
+        groups = _consecutive_index_groups(run_list)
+        plan.selection_export_groups = groups
+        group_chunks: list[torch.Tensor] = []
+        group_pre: list[torch.Tensor] = []
+        group_desc: list[str] = []
+        for pos_group in groups:
+            idx_group = [int(run_list[p]) for p in pos_group]
+            chunks = [export_chunks[p] for p in pos_group]
+            segs = [all_segments[idx] for idx in idx_group]
+            group_chunks.append(concat_continuous_chunks(chunks, segs, plan))
+            pre_chunks = [
+                export_pre_chunks[p] if p < len(export_pre_chunks) else export_chunks[p]
+                for p in pos_group
+            ]
+            group_pre.append(concat_continuous_chunks(pre_chunks, segs, plan))
+            group_desc.append(
+                f"#{idx_group[0] + 1}"
+                if len(idx_group) == 1
+                else f"#{idx_group[0] + 1}–{idx_group[-1] + 1}"
+            )
+        segment_outputs = group_chunks
+        segment_pre_refine = group_pre
+        fallback = torch.full((1, 1, 1, 3), 0.5)
+        combined = group_chunks[-1] if group_chunks else fallback
+        pre_combined = group_pre[-1] if group_pre else combined
+        reports.append(
+            "Export mode: selection — merged consecutive selected segments into "
+            f"{len(group_chunks)} clip(s): {', '.join(group_desc)}."
         )
     else:
         combined = concat_continuous_chunks(export_chunks, export_segments, plan)

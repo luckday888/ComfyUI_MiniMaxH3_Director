@@ -860,6 +860,7 @@ def build_plan_from_external_groups(
         resolve_continuity_keep_tail,
         resolve_continuity_mode,
         resolve_continuity_redraw,
+        resolve_audio_continuity_enabled,
         resolve_continuity_settings,
         resolve_exposure_anchor_enabled,
         resolve_exposure_anchor_strength,
@@ -868,6 +869,7 @@ def build_plan_from_external_groups(
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
+    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     continuity_mode = resolve_continuity_mode(timeline)
     continuity_redraw = resolve_continuity_redraw(timeline)
     continuity_keep_tail = resolve_continuity_keep_tail(timeline)
@@ -895,6 +897,7 @@ def build_plan_from_external_groups(
         run_indices=run_indices,
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
+        audio_continuity_enabled=audio_continuity_enabled,
         continuity_mode=continuity_mode,
         continuity_redraw=continuity_redraw,
         continuity_keep_tail=continuity_keep_tail,

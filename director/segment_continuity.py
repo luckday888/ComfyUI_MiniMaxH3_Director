@@ -222,6 +222,27 @@ def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[
     return True, snap_context_frames(raw)
 
 
+def resolve_audio_continuity_enabled(timeline: dict) -> bool:
+    """Read the「音频接续」companion toggle (output block).
+
+    控制下段是否跨接缝 pin/延续上段音频。与视频运动上下文 pin 相互独立：
+    视频照常拼接，音频可各段保留（硬切）。默认 ON（旧行为始终 pin 音频），
+    仅显式 false 关闭。
+    """
+    output = (timeline or {}).get("output") or {}
+    if "audioContinuityEnabled" in output:
+        raw = output.get("audioContinuityEnabled")
+    elif "audio_continuity_enabled" in output:
+        raw = output.get("audio_continuity_enabled")
+    else:
+        return True
+    if raw is None:
+        return True
+    if isinstance(raw, str):
+        return raw.strip().lower() not in {"false", "0", "no", "off", ""}
+    return raw is not False and raw != 0
+
+
 def resolve_exposure_anchor_enabled(timeline: dict) -> bool:
     """Read the「曝光锚定 / exposure anchor」companion toggle (output block).
 

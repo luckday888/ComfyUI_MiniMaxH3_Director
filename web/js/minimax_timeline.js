@@ -174,6 +174,19 @@ function isExposureAnchorEnabled(output) {
     return true;
 }
 
+/** 音频接续（段间引导配套）：默认开，仅显式关闭为 false */
+function isAudioContinuityEnabled(output) {
+    if (!output) return true;
+    const raw = output.audioContinuityEnabled ?? output.audio_continuity_enabled;
+    if (raw == null) return true;
+    if (raw === false || raw === 0) return false;
+    if (typeof raw === "string") {
+        const s = raw.trim().toLowerCase();
+        return s !== "false" && s !== "0" && s !== "no" && s !== "off" && s !== "";
+    }
+    return true;
+}
+
 /** 曝光锚定强度（百分比 0–60，默认 40），兼容旧版小数（0.4） */
 function getExposureAnchorStrength(output) {
     if (!output) return 40;
@@ -275,6 +288,7 @@ function normalizeOutputContinuity(output = {}) {
         continuityOverlapFrames: snapContinuityFrames(rawOverlap),
         exposureAnchorEnabled: isExposureAnchorEnabled(output),
         exposureAnchorStrength: getExposureAnchorStrength(output),
+        audioContinuityEnabled: isAudioContinuityEnabled(output),
         continuityMode: normalizeContinuityMode(output.continuityMode ?? output.continuity_mode),
         continuityRedraw: snapContinuityRedraw(
             output.continuityRedraw ?? output.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
@@ -2031,6 +2045,8 @@ function parseTimeline(raw, totalFrames, fps) {
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
             exposureAnchorEnabled: data.output?.exposureAnchorEnabled ?? data.output?.exposure_anchor_enabled,
             exposureAnchorStrength: data.output?.exposureAnchorStrength ?? data.output?.exposure_anchor_strength,
+            // 音频接续开关：此前漏读，刷新/重载后被回落为默认开启，导致用户取消勾选后再次自动勾选
+            audioContinuityEnabled: data.output?.audioContinuityEnabled ?? data.output?.audio_continuity_enabled,
             continuityMode: data.output?.continuityMode ?? data.output?.continuity_mode,
             continuityRedraw: data.output?.continuityRedraw ?? data.output?.continuity_redraw,
             continuityKeepTail: data.output?.continuityKeepTail ?? data.output?.continuity_keep_tail,
@@ -2977,6 +2993,9 @@ class MiniMaxH3DirectorEditor {
                     <option value="mute" data-i18n="output.audio.mute">静音</option>
                 </select>
             </span>
+            <span class="bd-out-audio-wrap hidden" data-r="audio-continuity-wrap" data-i18n-title="tooltip.audioContinuity">
+                <label style="white-space:nowrap"><input type="checkbox" data-r="audio-continuity-cb" checked><span data-i18n="output.audioContinuity">音频接续</span></label>
+            </span>
             <span class="bd-out-source-wrap hidden" data-r="out-source-wrap" data-i18n-title="widget.tooltip.exportSourceImages">
                 <label>
                     <input type="checkbox" data-r="out-export-source">
@@ -2995,6 +3014,7 @@ class MiniMaxH3DirectorEditor {
             <select class="bd-select" data-r="out-export-mode" data-i18n-title="tooltip.exportMode">
                 <option value="all" data-i18n="output.exportMode.all">全部导出</option>
                 <option value="segments" data-i18n="output.exportMode.segments">分段导出</option>
+                <option value="selection" data-i18n="output.exportMode.selection">选择导出</option>
             </select>
             <span class="hidden" data-r="out-max-frames-wrap" hidden aria-hidden="true">
                 <label data-i18n="output.maxFrames">最大帧数</label>
@@ -3356,6 +3376,8 @@ class MiniMaxH3DirectorEditor {
         this.fpsInput = this.root.querySelector('[data-r="timeline-fps"]');
         this.outAudioWrap = this.root.querySelector('[data-r="out-audio-wrap"]');
         this.outAudioMode = this.root.querySelector('[data-r="out-audio-mode"]');
+        this.audioContinuityWrap = this.root.querySelector('[data-r="audio-continuity-wrap"]');
+        this.audioContinuityCb = this.root.querySelector('[data-r="audio-continuity-cb"]');
         this.exportSourceImagesWrap = this.root.querySelector('[data-r="out-source-wrap"]');
         this.exportSourceImagesCb = this.root.querySelector('[data-r="out-export-source"]');
         this.exportPreFaceRefineWrap = this.root.querySelector('[data-r="out-preface-wrap"]');
@@ -3642,7 +3664,14 @@ class MiniMaxH3DirectorEditor {
         this.outMaxFrames.onchange = () => this.onOutputField("maxExportFrames", +this.outMaxFrames.value);
         this.outExportMode.onchange = () => this.onOutputField("exportMode", this.outExportMode.value);
         if (this.outAudioMode) {
-            this.outAudioMode.onchange = () => this.onOutputField("audioMode", this.outAudioMode.value);
+            this.outAudioMode.onchange = () => {
+                this.onOutputField("audioMode", this.outAudioMode.value);
+                this.updateAudioContinuityUI();
+            };
+        }
+        if (this.audioContinuityCb) {
+            this.audioContinuityCb.onchange = () =>
+                this.onOutputField("audioContinuityEnabled", !!this.audioContinuityCb.checked);
         }
         if (this.exportSourceImagesCb) {
             this.exportSourceImagesCb.onchange = () => {
@@ -4333,9 +4362,12 @@ class MiniMaxH3DirectorEditor {
             this.runSelectSummary.style.color = "#aaa";
         } else {
             const nums = (this.timeline.runSelection || []).map((i) => i + 1).join(", ");
-            const exportHint = this.timeline.output?.exportMode === "segments"
+            const runExportMode = this.timeline.output?.exportMode;
+            const exportHint = runExportMode === "segments"
                 ? t("runSelect.exportOnlyChecked")
-                : t("runSelect.fillUnchecked");
+                : runExportMode === "selection"
+                    ? t("runSelect.exportSelection")
+                    : t("runSelect.fillUnchecked");
             this.runSelectSummary.textContent = count === 1
                 ? t("runSelect.sampleOne", { unit: label, nums, hint: exportHint })
                 : t("runSelect.sampleMany", { count, unit: label, nums, hint: exportHint });
@@ -6317,6 +6349,7 @@ class MiniMaxH3DirectorEditor {
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
+            audioContinuityEnabled: true,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
             continuityKeepTail: true,
@@ -6354,7 +6387,10 @@ class MiniMaxH3DirectorEditor {
         if (this.outW) this.outW.value = String(out.width ?? 864);
         if (this.outH) this.outH.value = String(out.height ?? 480);
         if (this.outMaxFrames) this.outMaxFrames.value = String(out.maxExportFrames ?? 0);
-        if (this.outExportMode) this.outExportMode.value = out.exportMode === "segments" ? "segments" : "all";
+        if (this.outExportMode) {
+            const em = out.exportMode === "segments" || out.exportMode === "selection" ? out.exportMode : "all";
+            this.outExportMode.value = em;
+        }
         if (this.outAudioMode) {
             const am = normalizeAudioMode(out.audioMode);
             this.outAudioMode.value = am;
@@ -6363,6 +6399,7 @@ class MiniMaxH3DirectorEditor {
                 this.timeline.output = { ...out };
             }
         }
+        if (this.audioContinuityCb) this.audioContinuityCb.checked = isAudioContinuityEnabled(out);
         if (this.segmentContinuityCb) this.segmentContinuityCb.checked = isContinuityEnabled(out);
         if (this.segmentContinuityOverlap) {
             this.segmentContinuityOverlap.value = String(
@@ -6389,6 +6426,7 @@ class MiniMaxH3DirectorEditor {
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
         this.updateSegmentContinuityUI();
+        this.updateAudioContinuityUI();
         this.syncExportSourceImagesUI();
         this.syncExportPreFaceRefineUI();
         // 音频预览可用性随音频模式（仅生成模式）变化
@@ -6494,6 +6532,20 @@ class MiniMaxH3DirectorEditor {
         }
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
+    }
+
+    /** 音频接续开关：仅多段引导合格且非静音时显示 */
+    updateAudioContinuityUI() {
+        if (!this.audioContinuityWrap) return;
+        const audioMode = normalizeAudioMode(this.timeline?.output?.audioMode);
+        const show = isContinuityEligible(this) && audioMode !== "mute";
+        this.audioContinuityWrap.classList.toggle("hidden", !show);
+        this.audioContinuityWrap.hidden = !show;
+        this.audioContinuityWrap.setAttribute("aria-hidden", show ? "false" : "true");
+        if (this.audioContinuityCb && this.timeline?.output) {
+            // 合格性只控制显隐；DOM 始终对齐已保存的偏好
+            this.audioContinuityCb.checked = isAudioContinuityEnabled(this.timeline.output);
+        }
     }
 
     /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */
@@ -6693,9 +6745,12 @@ class MiniMaxH3DirectorEditor {
 
     _exportPreviewSuffix() {
         const cap = this.getMaxExportFrames();
-        const exportMode = this.timeline.output?.exportMode === "segments"
+        const previewExportMode = this.timeline.output?.exportMode;
+        const exportMode = previewExportMode === "segments"
             ? t("output.preview.segmentExport")
-            : "";
+            : previewExportMode === "selection"
+                ? t("output.preview.selectionExport")
+                : "";
         const dur = this.getTimelineDurationSec().toFixed(2);
         const fps = formatProbeFps(this.getFrameRate());
         const timeHint = t("output.preview.timeFps", { dur, fps });
@@ -6720,6 +6775,7 @@ class MiniMaxH3DirectorEditor {
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
+            audioContinuityEnabled: true,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
             continuityKeepTail: true,
@@ -6768,9 +6824,12 @@ class MiniMaxH3DirectorEditor {
             const n = parseInt(value, 10);
             this.timeline.output.maxExportFrames = Number.isFinite(n) && n > 0 ? n : 0;
         } else if (key === "exportMode") {
-            this.timeline.output.exportMode = value === "segments" ? "segments" : "all";
+            this.timeline.output.exportMode =
+                value === "segments" || value === "selection" ? value : "all";
         } else if (key === "audioMode") {
             this.timeline.output.audioMode = normalizeAudioMode(value);
+        } else if (key === "audioContinuityEnabled") {
+            this.timeline.output.audioContinuityEnabled = !!value;
         } else if (key === "continuityEnabled") {
             this.timeline.output.continuityEnabled = !!value;
         } else if (key === "continuityOverlapFrames") {
@@ -6868,6 +6927,7 @@ class MiniMaxH3DirectorEditor {
             continuityOverlapFrames: snapContinuityFrames(
                 prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
             ),
+            audioContinuityEnabled: isAudioContinuityEnabled(prevOut),
             continuityMode: normalizeContinuityMode(prevOut.continuityMode),
             continuityRedraw: snapContinuityRedraw(
                 prevOut.continuityRedraw ?? prevOut.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
@@ -6903,6 +6963,7 @@ class MiniMaxH3DirectorEditor {
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             exposureAnchorEnabled: true, exposureAnchorStrength: 40,
+            audioContinuityEnabled: true,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
             continuityKeepTail: true,
@@ -6933,6 +6994,11 @@ class MiniMaxH3DirectorEditor {
         } else {
             // Normalize stored flag without clearing preference while ineligible.
             this.timeline.output.continuityEnabled = isContinuityEnabled(this.timeline.output);
+        }
+        // 音频接续配套开关：与总开关一致，合格时从 DOM 回读用户选择；不合格时保留已存偏好
+        // （缺失默认开启）。此前缺少这段回读，output 一旦按默认值重建就会丢掉用户的取消勾选。
+        if (continuityEligible && this.audioContinuityCb) {
+            this.timeline.output.audioContinuityEnabled = !!this.audioContinuityCb.checked;
         }
         if (continuityEligible && this.segmentContinuityOverlap) {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
@@ -6992,6 +7058,7 @@ class MiniMaxH3DirectorEditor {
         if (this.isRunSelectEnabled()) this.normalizeRunSelection();
         this.updateRunSelectUI();
         this.updateSegmentContinuityUI();
+        this.updateAudioContinuityUI();
         if (this.taskTypeWidget) this.taskTypeWidget.value = this.timeline.global.taskType;
         if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt;
         if (this.negativePromptWidget) {
