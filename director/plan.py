@@ -297,6 +297,10 @@ class DirectorPlan:
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
+    # 段间引导伴生：开环、仅作用于导出像素的曝光锚定，把各段亮度漂移拉回首段
+    # 曝光基准；不触碰 latent/音频，原生 latent pin 不受影响
+    exposure_anchor_enabled: bool = True
+    exposure_anchor_strength: float = 0.40  # gamma 范围钳位 [1/1+s, 1+s]；0 = 关闭
     # "guide" (motion-context keyframes) | "continue" (引导+重绘 / latent remask).
     continuity_mode: str = "guide"
     continuity_redraw: float = 0.10
@@ -951,12 +955,16 @@ def build_director_plan(
         resolve_continuity_mode,
         resolve_continuity_redraw,
         resolve_continuity_settings,
+        resolve_exposure_anchor_enabled,
+        resolve_exposure_anchor_strength,
         resolve_segment_continuity_from_prev,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
+    exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
+    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
     continuity_mode = resolve_continuity_mode(timeline)
     continuity_redraw = resolve_continuity_redraw(timeline)
     continuity_keep_tail = resolve_continuity_keep_tail(timeline)
@@ -994,6 +1002,8 @@ def build_director_plan(
         continuity_mode=continuity_mode,
         continuity_redraw=continuity_redraw,
         continuity_keep_tail=continuity_keep_tail,
+        exposure_anchor_enabled=exposure_anchor_enabled,
+        exposure_anchor_strength=exposure_anchor_strength,
         global_ref_audios=global_ref_audios,
     )
 

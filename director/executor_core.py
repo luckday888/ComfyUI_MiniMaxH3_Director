@@ -92,6 +92,8 @@ from .segment_mp4_export import (
 )
 from .segment_continuity import (
     concat_continuous_chunks,
+    exposure_anchor_mean,
+    flatten_segment_exposure,
     is_continue_mode,
     is_continuity_active,
     match_export_opening_grade,
@@ -600,6 +602,18 @@ def execute_director_plan_core(
     # completed_* also get export-fill hydrations from disk; this set does not.
     resampled_this_run: set[int] = set()
     held_for_confirmation = False
+    # 开环曝光锚定：绝对目标 = 首段导出曝光，全运行共享，拉平各段亮度漂移。
+    # 仅作用于像素侧，绝不回灌 latent/音频（原生 latent pin / 运动交接不受影响）。
+    # 在 _run_one_segment 内通过 nonlocal 回绑
+    exposure_anchor_rgb: torch.Tensor | None = None
+    exposure_anchor_on = bool(
+        getattr(plan, "exposure_anchor_enabled", False)
+        and getattr(plan, "continuity_enabled", False)
+        and timeline_seg_total >= 2
+    )
+    exposure_anchor_strength = float(
+        getattr(plan, "exposure_anchor_strength", 0.0) or 0.0
+    )
     # True export lengths (post continuity trim). Kept after「分段导出」
     # replaces older IMAGE slots with 1-frame posters.
     segment_export_lengths: dict[int, int] = {}
@@ -608,7 +622,7 @@ def execute_director_plan_core(
     def _run_one_segment(
         seg, *, progress_index: int
     ) -> tuple[torch.Tensor, dict[str, Any] | None, torch.Tensor, torch.Tensor]:
-        nonlocal held_for_confirmation
+        nonlocal held_for_confirmation, exposure_anchor_rgb
         if seg.task_key not in SUPPORTED_TASK_KEYS:
             raise ValueError(
                 f"Task '{seg.task_key}' is not supported on MiniMax H3 Director. "
@@ -1437,6 +1451,23 @@ def execute_director_plan_core(
             export_len=export_len,
             plan=plan,
         )
+        # 段间引导「曝光锚定」：把本段导出自由区用平滑的逐帧逐通道 gamma
+        # 拉回绝对目标（首段曝光），仅动全局亮度。开环、仅像素侧：latent 与
+        # 音频完全不触碰，原生 v9 latent pin 与音频交接完整保留
+        if exposure_anchor_on:
+            if exposure_anchor_rgb is None:
+                # 局部重跑：从已完成（如缓存命中）的最低索引段取锚，保证
+                # 本次拉平到与整跑相同的参考
+                for _idx in sorted(k for k, v in completed_outputs.items() if v is not None):
+                    exposure_anchor_rgb = exposure_anchor_mean(completed_outputs[_idx])
+                    if exposure_anchor_rgb is not None:
+                        break
+            decoded, exposure_anchor_rgb = flatten_segment_exposure(
+                decoded,
+                anchor_rgb=exposure_anchor_rgb,
+                strength=exposure_anchor_strength,
+                seg_index=seg.index,
+            )
         report_director_progress(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=1, phase_max=1, **meta,
@@ -1455,6 +1486,14 @@ def execute_director_plan_core(
                 export_len=export_len,
                 plan=plan,
             )
+            # 一采预览同样拉平到锚点，使保存的 _pre 片段与最终片段曝光一致
+            if exposure_anchor_on:
+                pre_export, _ = flatten_segment_exposure(
+                    pre_export,
+                    anchor_rgb=exposure_anchor_rgb,
+                    strength=exposure_anchor_strength,
+                    seg_index=seg.index,
+                )
             pre_chunk = pre_export
             if getattr(pre_chunk, "device", None) is not None and pre_chunk.device.type != "cpu":
                 pre_chunk = pre_chunk.cpu()

@@ -861,6 +861,8 @@ def build_plan_from_external_groups(
         resolve_continuity_mode,
         resolve_continuity_redraw,
         resolve_continuity_settings,
+        resolve_exposure_anchor_enabled,
+        resolve_exposure_anchor_strength,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
@@ -869,6 +871,8 @@ def build_plan_from_external_groups(
     continuity_mode = resolve_continuity_mode(timeline)
     continuity_redraw = resolve_continuity_redraw(timeline)
     continuity_keep_tail = resolve_continuity_keep_tail(timeline)
+    exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
+    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
 
     plan = DirectorPlan(
         frame_rate=fps,
@@ -894,6 +898,8 @@ def build_plan_from_external_groups(
         continuity_mode=continuity_mode,
         continuity_redraw=continuity_redraw,
         continuity_keep_tail=continuity_keep_tail,
+        exposure_anchor_enabled=exposure_anchor_enabled,
+        exposure_anchor_strength=exposure_anchor_strength,
         global_ref_audios=list(common_audios_raw) if family == "r2v" else [],
     )
     # Prefer the frontend wiring witness (same blob the cache panel sends).

@@ -161,6 +161,30 @@ function isContinuityEnabled(output) {
     return false;
 }
 
+/** 曝光锚定（段间引导配套）：默认开，仅显式关闭为 false */
+function isExposureAnchorEnabled(output) {
+    if (!output) return true;
+    const raw = output.exposureAnchorEnabled ?? output.exposure_anchor_enabled;
+    if (raw == null) return true;
+    if (raw === false || raw === 0) return false;
+    if (typeof raw === "string") {
+        const s = raw.trim().toLowerCase();
+        return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }
+    return true;
+}
+
+/** 曝光锚定强度（百分比 0–60，默认 40），兼容旧版小数（0.4） */
+function getExposureAnchorStrength(output) {
+    if (!output) return 40;
+    let raw = output.exposureAnchorStrength ?? output.exposure_anchor_strength;
+    if (raw == null || raw === "") return 40;
+    let n = Number(raw);
+    if (!Number.isFinite(n)) return 40;
+    if (n > 0 && n < 1) n = n * 100; // 0.4 → 40
+    return Math.max(0, Math.min(60, Math.round(n)));
+}
+
 function isContinuityKeepTail(output) {
     if (!output) return true;
     const raw = output.continuityKeepTail ?? output.continuity_keep_tail;
@@ -249,6 +273,8 @@ function normalizeOutputContinuity(output = {}) {
         ...output,
         continuityEnabled: isContinuityEnabled(output),
         continuityOverlapFrames: snapContinuityFrames(rawOverlap),
+        exposureAnchorEnabled: isExposureAnchorEnabled(output),
+        exposureAnchorStrength: getExposureAnchorStrength(output),
         continuityMode: normalizeContinuityMode(output.continuityMode ?? output.continuity_mode),
         continuityRedraw: snapContinuityRedraw(
             output.continuityRedraw ?? output.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
@@ -1917,6 +1943,7 @@ function parseTimeline(raw, totalFrames, fps) {
             exportPreFaceRefine: false,
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            exposureAnchorEnabled: true, exposureAnchorStrength: 40,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
             continuityKeepTail: true,
@@ -1988,6 +2015,8 @@ function parseTimeline(raw, totalFrames, fps) {
             refImageSize: normalizeRefImageSize(data.output?.refImageSize ?? data.output?.ref_image_size),
             continuityEnabled: data.output?.continuityEnabled ?? data.output?.continuity_enabled,
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
+            exposureAnchorEnabled: data.output?.exposureAnchorEnabled ?? data.output?.exposure_anchor_enabled,
+            exposureAnchorStrength: data.output?.exposureAnchorStrength ?? data.output?.exposure_anchor_strength,
             continuityMode: data.output?.continuityMode ?? data.output?.continuity_mode,
             continuityRedraw: data.output?.continuityRedraw ?? data.output?.continuity_redraw,
             continuityKeepTail: data.output?.continuityKeepTail ?? data.output?.continuity_keep_tail,
@@ -2979,6 +3008,11 @@ class MiniMaxH3DirectorEditor {
                     <input type="checkbox" data-r="segment-continuity-keep-tail" checked>
                     <span data-i18n="output.continuityKeepTail">保完整</span>
                 </label>
+                <label data-i18n-title="tooltip.exposureAnchor" style="margin-left:6px;white-space:nowrap"><input type="checkbox" data-r="exposure-anchor-cb" checked><span data-i18n="output.exposureAnchor">曝光锚定</span></label>
+                <span data-r="exposure-anchor-strength-wrap" style="display:inline-flex;align-items:center;gap:2px;white-space:nowrap" data-i18n-title="tooltip.exposureAnchorStrength">
+                    <input type="range" data-r="exposure-anchor-strength" min="0" max="60" step="1" value="40" style="width:64px">
+                    <span class="bd-meta" data-r="exposure-anchor-strength-val">40%</span>
+                </span>
             </span>
             <button type="button" class="bd-btn bd-btn-live-preview" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
@@ -3289,6 +3323,9 @@ class MiniMaxH3DirectorEditor {
         this.segmentContinuityWrap = this.root.querySelector('[data-r="segment-continuity-wrap"]');
         this.segmentContinuityCb = this.root.querySelector('[data-r="segment-continuity-cb"]');
         this.segmentContinuityOverlap = this.root.querySelector('[data-r="segment-continuity-overlap"]');
+        this.exposureAnchorCb = this.root.querySelector('[data-r="exposure-anchor-cb"]');
+        this.exposureAnchorStrength = this.root.querySelector('[data-r="exposure-anchor-strength"]');
+        this.exposureAnchorStrengthVal = this.root.querySelector('[data-r="exposure-anchor-strength-val"]');
         this.segmentContinuityModeWrap = this.root.querySelector('[data-r="segment-continuity-mode-wrap"]');
         this.segmentContinuityMode = this.root.querySelector('[data-r="segment-continuity-mode"]');
         this.segmentContinuityRedrawWrap = this.root.querySelector('[data-r="segment-continuity-redraw-wrap"]');
@@ -3600,6 +3637,29 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityOverlap.oninput = applyOverlap;
             this.segmentContinuityOverlap.addEventListener("keydown", (e) => e.stopPropagation());
             this.segmentContinuityOverlap.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.exposureAnchorCb) {
+            this.exposureAnchorCb.onchange = () => {
+                this.onOutputField("exposureAnchorEnabled", this.exposureAnchorCb.checked);
+                this.updateSegmentContinuityUI();
+            };
+        }
+        if (this.exposureAnchorStrength) {
+            const syncStrengthLabel = () => {
+                if (this.exposureAnchorStrengthVal) {
+                    this.exposureAnchorStrengthVal.textContent = `${+this.exposureAnchorStrength.value}%`;
+                }
+            };
+            this.exposureAnchorStrength.oninput = () => {
+                syncStrengthLabel();
+                this.onOutputField("exposureAnchorStrength", +this.exposureAnchorStrength.value);
+            };
+            this.exposureAnchorStrength.onchange = () => {
+                syncStrengthLabel();
+                this.onOutputField("exposureAnchorStrength", +this.exposureAnchorStrength.value);
+            };
+            this.exposureAnchorStrength.addEventListener("keydown", (e) => e.stopPropagation());
+            this.exposureAnchorStrength.addEventListener("keyup", (e) => e.stopPropagation());
         }
         if (this.segmentContinuityMode) {
             this.segmentContinuityMode.onchange = () => {
@@ -6209,6 +6269,7 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            exposureAnchorEnabled: true, exposureAnchorStrength: 40,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
             continuityKeepTail: true,
@@ -6271,6 +6332,12 @@ class MiniMaxH3DirectorEditor {
         }
         if (this.segmentContinuityKeepTail) {
             this.segmentContinuityKeepTail.checked = isContinuityKeepTail(out);
+        }
+        if (this.exposureAnchorCb) this.exposureAnchorCb.checked = isExposureAnchorEnabled(out);
+        if (this.exposureAnchorStrength) {
+            const s = getExposureAnchorStrength(out);
+            this.exposureAnchorStrength.value = String(s);
+            if (this.exposureAnchorStrengthVal) this.exposureAnchorStrengthVal.textContent = `${s}%`;
         }
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
@@ -6361,6 +6428,19 @@ class MiniMaxH3DirectorEditor {
             const keepTail = isContinuityKeepTail(this.timeline.output);
             this.segmentContinuityKeepTail.checked = keepTail;
             this.timeline.output.continuityKeepTail = keepTail;
+        }
+        if (this.exposureAnchorCb && this.timeline?.output) {
+            this.exposureAnchorCb.checked = isExposureAnchorEnabled(this.timeline.output);
+        }
+        if (this.exposureAnchorStrength && this.timeline?.output) {
+            const s = getExposureAnchorStrength(this.timeline.output);
+            this.exposureAnchorStrength.value = String(s);
+            if (this.exposureAnchorStrengthVal) this.exposureAnchorStrengthVal.textContent = `${s}%`;
+            const on = isExposureAnchorEnabled(this.timeline.output);
+            this.exposureAnchorStrength.disabled = !on;
+            if (this.exposureAnchorStrengthVal) {
+                this.exposureAnchorStrengthVal.style.opacity = on ? "" : "0.4";
+            }
         }
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
@@ -6589,6 +6669,7 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            exposureAnchorEnabled: true, exposureAnchorStrength: 40,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
             continuityKeepTail: true,
@@ -6650,6 +6731,12 @@ class MiniMaxH3DirectorEditor {
             this.timeline.output.continuityRedraw = snapContinuityRedraw(value);
         } else if (key === "continuityKeepTail") {
             this.timeline.output.continuityKeepTail = !!value;
+        } else if (key === "exposureAnchorEnabled") {
+            this.timeline.output.exposureAnchorEnabled = !!value;
+        } else if (key === "exposureAnchorStrength") {
+            let n = Math.round(Number(value) || 0);
+            if (n > 0 && n < 1) n = Math.round(n * 100);
+            this.timeline.output.exposureAnchorStrength = Math.max(0, Math.min(60, n));
         }
         this.syncOutputUIFromTimeline();
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
@@ -6765,6 +6852,7 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            exposureAnchorEnabled: true, exposureAnchorStrength: 40,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
             continuityKeepTail: true,
@@ -6831,6 +6919,19 @@ class MiniMaxH3DirectorEditor {
             this.timeline.output.continuityKeepTail = !!this.segmentContinuityKeepTail.checked;
         } else {
             this.timeline.output.continuityKeepTail = isContinuityKeepTail(this.timeline.output);
+        }
+        // 曝光锚定：eligible 时从 DOM 读；否则保留已存偏好（缺省默认开 / 40%）
+        if (continuityEligible && this.exposureAnchorCb) {
+            this.timeline.output.exposureAnchorEnabled = !!this.exposureAnchorCb.checked;
+        } else if (this.timeline.output.exposureAnchorEnabled == null) {
+            this.timeline.output.exposureAnchorEnabled = true;
+        }
+        if (continuityEligible && this.exposureAnchorStrength) {
+            this.timeline.output.exposureAnchorStrength = getExposureAnchorStrength({
+                exposureAnchorStrength: this.exposureAnchorStrength.value,
+            });
+        } else if (this.timeline.output.exposureAnchorStrength == null) {
+            this.timeline.output.exposureAnchorStrength = 40;
         }
         this.syncOutputToWidgets();
     }
