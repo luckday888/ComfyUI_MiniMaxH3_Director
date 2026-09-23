@@ -15,12 +15,16 @@ Thumbs.db
 .idea/
 .vscode/
 *.log
+tmp/
 
 # Cursor (do not publish; avoids Cursor Agent noise in repo history)
 .cursor/
 .cursorrules
 .cursorignore
 *.cursor*
+
+# Claude
+.claude/
 
 # Runtime / local caches (ComfyUI output/minimax_seg_cache is outside this repo)
 .minimax_seg_cache/
@@ -32,3 +36,7 @@ _seam_probe_*/
 
 # Registry CLI leftover zip
 node.zip
+
+# Other
+.h3result/
+
