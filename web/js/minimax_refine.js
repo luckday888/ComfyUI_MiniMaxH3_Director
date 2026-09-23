@@ -1002,8 +1002,6 @@ app.registerExtension({
     nodeCreated(node) {
         const cls = node?.comfyClass || node?.type || "";
         if (DIRECTOR_CLASSES.has(cls)) {
-            // Expose a hook the timeline editor calls after changing the task
-            // type (a custom DOM control that does not fire onWidgetChanged).
             node._mmxRefreshFirstPassCache = (delay = 0) => {
                 refreshCacheStatusForDirector(node, delay);
             };

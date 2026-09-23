@@ -367,8 +367,10 @@ class MiniMaxH3Director:
                 block_final_images=held_for_confirmation,
             )
         finally:
-            # Free the run-scoped source-audio PCM cache (replaces the old
-            # never-cleared process-level cache).
+            # Full source/reference PCM is execution-scoped.
             cache = getattr(plan, "audio_decode_cache", None)
             if isinstance(cache, dict):
                 cache.clear()
+            for item in getattr(plan, "global_ref_audios", None) or []:
+                if getattr(item, "audio_path", ""):
+                    item.audio = None

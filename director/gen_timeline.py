@@ -383,7 +383,6 @@ def build_gen_director_plan(
         concat_common_segment_prompt,
         merge_indexed_refs,
         resolve_ref_image_size,
-        resolve_seg_id,
         segment_ref_audios_for_context,
         segment_refs_for_context,
     )
@@ -409,12 +408,11 @@ def build_gen_director_plan(
         if global_block.get("commonEnabled") is not None
         else global_block.get("common_enabled")
     )
-    # Decode the global reference audios once and share the decoded PCM across
-    # every segment this run (global edit mode, or r2v shared「公共参数」),
-    # instead of re-decoding the same upload per segment.
     shared_ref_audios = (
-        _load_ref_audios(global_block.get("refAudios") or global_block.get("ref_audios") or [])
-        if (edit_mode == "global" or common_enabled)
+        _load_ref_audios(
+            global_block.get("refAudios") or global_block.get("ref_audios") or []
+        )
+        if edit_mode == "global" or common_enabled
         else []
     )
 
@@ -654,7 +652,6 @@ def build_gen_director_plan(
                 ref_videos=seg_ref_videos,
                 negative_prompt=seg_negative,
                 source_clip=seg_source,
-                seg_id=resolve_seg_id(seg_data, idx),
                 continuity_from_prev=resolve_segment_continuity_from_prev(
                     seg_data if isinstance(seg_data, dict) else {},
                     segment_index=idx,
@@ -677,22 +674,18 @@ def build_gen_director_plan(
     src_w, src_h = _resolve_gen_image_source_dims(segment_ranges, global_block, output_block)
 
     from .segment_continuity import (
-        resolve_audio_continuity_enabled,
+        resolve_continuity_keep_tail,
         resolve_continuity_mode,
         resolve_continuity_redraw,
         resolve_continuity_settings,
-        resolve_exposure_anchor_enabled,
-        resolve_exposure_anchor_strength,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
-    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     continuity_mode = resolve_continuity_mode(timeline)
     continuity_redraw = resolve_continuity_redraw(timeline)
-    exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
-    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
+    continuity_keep_tail = resolve_continuity_keep_tail(timeline)
 
     return DirectorPlan(
         frame_rate=fps,
@@ -707,7 +700,6 @@ def build_gen_director_plan(
         global_task_key=task_key,
         global_prompt=prompt,
         global_refs=global_refs,
-        global_ref_audios=shared_ref_audios,
         source_video=source_video,
         segments=segments,
         edit_mode=edit_mode,
@@ -716,9 +708,8 @@ def build_gen_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
-        audio_continuity_enabled=audio_continuity_enabled,
         continuity_mode=continuity_mode,
         continuity_redraw=continuity_redraw,
-        exposure_anchor_enabled=exposure_anchor_enabled,
-        exposure_anchor_strength=exposure_anchor_strength,
+        continuity_keep_tail=continuity_keep_tail,
+        global_ref_audios=shared_ref_audios,
     )

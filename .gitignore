@@ -30,11 +30,5 @@ Thumbs.db
 _seam_probe/
 _seam_probe_*/
 
-
-.claude/
-.gitignore
-
 # Registry CLI leftover zip
 node.zip
-
-tmp/

@@ -8,74 +8,13 @@ KSamplerSelect → RandomNoise → SamplerCustomAdvanced.
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict
 from typing import Any, Callable
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core_sampling")
 
 PhaseCallback = Callable[[str, float], None]
 StepPreviewCallback = Callable[[int, int, Any], None]
-LoadedModelCallback = Callable[[Any], None]
 StepStateCallback = Callable[[int, int, Any, Any], None]
-
-
-# ── 进程级 SigmaShift clone 复用 ────────────────────────────────────────────
-# shift_video / shift_audio 是运行级常量。官方 MiniMaxH3SigmaShift.execute 每次都
-# 返回一个 m = model.clone()（共享同一份底层 MiniMaxH3 权重，仅叠加 model_sampling
-# 补丁）。本插件在单个节点内用 Python 直接编排多个采样段，这些 clone 不是图节点
-# 输出、不被 ComfyUI 执行器缓存钉住，函数返回即成为垃圾；段间被 Python GC 后，
-# 底层模型仍被节点输入的主 MODEL 持有 → ComfyUI 判定 is_dead()（patcher 弱引用
-# 已死、nn.Module 仍活），每次 load_models_gpu 都刷 "memory leak with model
-# MiniMaxH3" 警告，死条目还逐段堆积。按“主 patcher 身份 + shift 参数”复用同一个
-# clone，使其跨段、跨运行始终存活，从根上消除 is_dead（不复制权重、不重读磁盘）。
-_SHIFT_CLONE_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
-_SHIFT_CLONE_MAX = 16
-
-
-def get_persistent_shifted_model(base, shift_video: float, shift_audio: float):
-    """返回（必要时创建并缓存）主 MODEL 的持久 SigmaShift clone。"""
-    key = (id(base), round(float(shift_video), 6), round(float(shift_audio), 6))
-    cached = _SHIFT_CLONE_CACHE.get(key)
-    if cached is not None:
-        _SHIFT_CLONE_CACHE.move_to_end(key)
-        return cached
-    from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
-
-    shifted = MiniMaxH3SigmaShift.execute(base, float(shift_video), float(shift_audio))
-    model_use = _unpack_node_output(shifted)[0]
-    _SHIFT_CLONE_CACHE[key] = model_use
-    _SHIFT_CLONE_CACHE.move_to_end(key)
-    while len(_SHIFT_CLONE_CACHE) > _SHIFT_CLONE_MAX:
-        _SHIFT_CLONE_CACHE.popitem(last=False)
-    return model_use
-
-
-class ShiftedModelCache:
-    """运行级 SigmaShift 句柄（SelfLift / executor 使用），兼容上游接口。
-
-    真正的 clone 统一由进程级 ``_SHIFT_CLONE_CACHE`` 保活（见
-    ``get_persistent_shifted_model``）。本类只记录本次运行借出了哪些 clone：
-    ``clear()`` 仅清运行句柄引用，不碰持久缓存，保证跨段/跨运行的 is_dead
-    修复继续生效。
-    """
-
-    def __init__(self) -> None:
-        self._items: list[Any] = []
-
-    def get(self, model, shift_video: float, shift_audio: float):
-        model_use = get_persistent_shifted_model(
-            model, float(shift_video), float(shift_audio)
-        )
-        if not any(item is model_use for item in self._items):
-            self._items.append(model_use)
-        return model_use
-
-    def holds(self, model) -> bool:
-        return any(item is model for item in self._items)
-
-    def clear(self) -> None:
-        # 只释放运行句柄；持久 clone 继续由 _SHIFT_CLONE_CACHE 跨运行保活
-        self._items.clear()
 
 
 class _FixedNoise:
@@ -136,6 +75,37 @@ def _use_basic_guider(cfg: float, negative) -> bool:
     return abs(float(cfg) - 1.0) < 1e-6
 
 
+class ShiftedModelCache:
+    """Reuse one MiniMaxH3SigmaShift clone per parent MODEL for the whole execute.
+
+    Official SigmaShift always ``model.clone()``. Dropping that clone after each
+    segment leaves a dead LoadedModel (shared MiniMaxH3 still held by the graph
+    MODEL) that ``free_memory`` skips. Keeping the clone alive lets segment
+    cleanup unload it, then the next segment reloads the same patcher.
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[tuple[int, float, float], Any] = {}
+
+    def get(self, model, shift_video: float, shift_audio: float):
+        key = (id(model), float(shift_video), float(shift_audio))
+        hit = self._items.get(key)
+        if hit is not None:
+            return hit
+        from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
+
+        shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
+        model_use = _unpack_node_output(shifted)[0]
+        self._items[key] = model_use
+        return model_use
+
+    def holds(self, model) -> bool:
+        return any(item is model for item in self._items.values())
+
+    def clear(self) -> None:
+        self._items.clear()
+
+
 def sample_single_stage(
     *,
     model,
@@ -157,12 +127,9 @@ def sample_single_stage(
     sigmas=None,
     apply_shift: bool = True,
     after_shift=None,
-    shifted_model=None,
-    on_loaded: LoadedModelCallback | None = None,
     enable_tiling: bool = False,
     tile_count: int = 2,
     tile_overlap: int = 128,
-    # SelfLift 运行级缓存（句柄内部仍委托进程级持久缓存）
     shift_cache: ShiftedModelCache | None = None,
     on_step_state: StepStateCallback | None = None,
     zero_noise: bool = False,
@@ -177,22 +144,20 @@ def sample_single_stage(
         RandomNoise,
         SamplerCustomAdvanced,
     )
+    from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
 
     def notify(phase: str, value: float) -> None:
         if on_phase:
             on_phase(phase, value)
 
     notify(phase_name, 0)
-    if shifted_model is not None:
-        # 调用方复用进程级持久 shift clone（跨段同一 patcher），不再每段新建即弃 clone。
-        model_use = shifted_model
-    elif apply_shift:
-        # 默认也走持久缓存：多段共享一个 SigmaShift clone，避免 is_dead 假泄漏。
-        model_use = get_persistent_shifted_model(
-            model, float(shift_video), float(shift_audio)
-        )
-    else:
-        model_use = model
+    model_use = model
+    if apply_shift:
+        if shift_cache is not None:
+            model_use = shift_cache.get(model, shift_video, shift_audio)
+        else:
+            shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
+            model_use = _unpack_node_output(shifted)[0]
 
     if sigmas is not None:
         if torch.is_tensor(sigmas):
@@ -282,16 +247,20 @@ def sample_single_stage(
             guider.sample = orig_sample
         if restore_tiles is not None:
             restore_tiles()
+        if callable(after_shift):
+            try:
+                from .h3_latent_continue import uninstall_continue_prefix_remask
 
-    # 上报本次真正被 load_models_gpu 登记的最终 patcher（after_shift 产生的一次性
-    # remask clone，或持久 shift clone）。调用方据回调把它强引用到“下一次模型加载
-    # 之后”，使 ComfyUI 的 is_clone 清扫能在旧 patcher 仍存活时正常摘除其登记条目，
-    # 杜绝“patcher 已被 GC、底层 MiniMaxH3 仍存活”的 is_dead 假泄漏堆积。
-    if on_loaded is not None:
-        try:
-            on_loaded(model_use)
-        except Exception as exc:
-            log.debug("on_loaded model pin callback skipped: %s", exc)
+                uninstall_continue_prefix_remask(model_use)
+            except Exception as exc:
+                log.debug("Prefix remask uninstall skipped: %s", exc)
+        # Drop sampler-graph refs. Keep a cached SigmaShift clone alive so
+        # segment cleanup can unload it instead of leaving a dead LoadedModel.
+        guider = None
+        noise_obj = None
+        sampler_obj = None
+        if model_use is not model and (shift_cache is None or not shift_cache.holds(model_use)):
+            model_use = None
 
     notify(phase_name, 1)
     return out

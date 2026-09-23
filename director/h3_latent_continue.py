@@ -2,19 +2,8 @@
 
 Writes the previous sampled MiniMax H3 AV tail into the next empty latent and
 builds a NestedTensor noise mask. Optional per-step prefix remask lives on a
-cloned MODEL after SigmaShift.
-
-「引导+重绘」模式下本模块与 ``apply_motion_context`` 叠加使用：后者注入官方 Guide
-关键帧（条件钉，负责跨段连续），本模块只在 latent 侧写尾巴 + 掩码。H3 的 denoise_mask
-仅重映射目标行时间步，关键帧条件行始终被钉在 VISUAL_COND_TIMESTEP，二者相互独立、可
-安全叠加。本模块不安装 h3_context_patches（由 apply_motion_context 负责，全局只装一次）。
-
-v5 起，与 Guide 关键帧一一配对的前缀 token 掩码一律 m=0 硬锁。H3 训练分布里 cond 锚点行
-（t=0.999 干净条件）的配对 video 行只以 m=0 的 i2v 首帧 carry 形态出现；v4 按「重绘幅度」
-给配对 token m>0（如 0.65），形成「不可改条件 + 同一画面重绘中」的训练外冲突，模型输出
-被拉向平均化低幅速度，并经 3D 卷积/时空注意力污染接缝后的第一个自由 token——表现为新段
-开头劣化、随段内时长恢复。因此「重绘幅度」不再重画锚点：continue 的配对区与 guide 同为
-硬锁 carry（参数保留校验与进缓存指纹，但不改变掩码）。
+cloned MODEL after SigmaShift. Does not install h3_context_patches and must
+not be stacked with apply_motion_context.
 """
 
 from __future__ import annotations
@@ -41,17 +30,14 @@ from .h3_motion_context import (
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.h3_latent_continue")
 
-# v5：配对 Guide 关键帧的前缀 token 全部 m=0 硬锁（对齐 i2v carry 训练形态，根除接缝劣化）。
-CONTINUE_PIPELINE_ID = "minimax_h3_latent_continue_v5"
+CONTINUE_PIPELINE_ID = "minimax_h3_latent_continue_v4"
 PREFIX_STEPS_KEY = "_director_continue_prefix_steps"
 CONTINUE_SEAM_KEY = "_director_continue_seam_min"
-# SelfLift 掩码融合标记（v5 前用于让 remask 的 head token 硬锁；v5 配对 token 默认全
-# 硬锁，该标记保留是为旧 latent 兼容，行为已被涵盖）。
-SELFLIFT_FUSE_KEY = "_director_selflift_mask_fuse"
 SEAM_TAPER_TOKENS = 4
-# 「重绘幅度」参数的默认值与取值区间仍用于 UI 校验和缓存指纹；v5 起不改变配对区掩码。
-SEAM_MIN_MASK = 0.65
-SEAM_FLOOR_MIN = 0.40
+# 0 = hard-copy the seam tokens (sampler keeps latent_image). H3 also treats
+# mask=0 as VISUAL_COND_TIMESTEP; that is what「重绘幅度 0」asks for.
+SEAM_MIN_MASK = 0.10
+SEAM_FLOOR_MIN = 0.0
 SEAM_FLOOR_MAX = 0.95
 AUDIO_SOFT_RELEASE_TICKS = 8
 _WRAPPER_KEY = "director_h3_continue_prefix_remask"
@@ -73,19 +59,16 @@ def prefix_token_weights(
     taper_steps: int = SEAM_TAPER_TOKENS,
     seam_min: float | None = None,
 ) -> tuple[float, ...]:
-    """配对 Guide 关键帧的前缀 token 权重，v5 起一律全 0（硬锁）。
-
-    H3 训练分布里 cond 锚点行只与 m=0 的 video 行配对（i2v 首帧 carry）；m>0 会形成
-    「不可改条件 + 同一画面重绘中」的冲突输入，污染接缝后的自由区（新段开头 U 形劣化）。
-
-    ``taper_steps`` / ``seam_min`` 仅为兼容旧调用签名保留，不再影响权重；「重绘幅度」
-    参数照常校验并进入缓存指纹，但不会重画锚点 token。
-    """
-    del taper_steps, seam_min
+    """1.0 on the disposable head, taper toward seam_min (0 = hard-lock seam)."""
     n = int(prefix_steps)
     if n < 1:
         return ()
-    return (0.0,) * n
+    taper = max(1, min(int(taper_steps), n))
+    head = n - taper
+    floor = clamp_seam_min_mask(SEAM_MIN_MASK if seam_min is None else seam_min)
+    weights = [1.0] * head
+    weights.extend(1.0 + (floor - 1.0) * (float(i + 1) / float(taper)) for i in range(taper))
+    return tuple(weights)
 
 
 def _nested(video: torch.Tensor, audio: torch.Tensor, template=None):
@@ -303,12 +286,14 @@ def apply_latent_continue(
     out[CONTINUE_SEAM_KEY] = float(seam)
     log.info(
         "Director continue: wrote %d video tokens (%s, %df) + %d audio ticks; "
-        "prefix mask ALL hard-lock m=0 (paired Guide keyframes; redraw=%.2f kept "
-        "for fingerprint only, anchors never redrawn); trim=%df prev_export_trim=%df",
+        "prefix mask head=%.2f seam=%.2f (floor=%.2f, no cond-pin); "
+        "trim=%df prev_export_trim=%df",
         t_tail,
         video_src,
         span,
         audio_pin_t,
+        weights[0] if weights else 0.0,
+        weights[-1] if weights else 0.0,
         seam,
         span,
         prev_export_trim,
@@ -397,24 +382,27 @@ class _PrefixRemask:
         video_shape: tuple[int, ...],
         seam_min: float | None = None,
         audio_shape: tuple[int, ...] | None = None,
-        selflift_fuse: bool = False,
     ):
         self.prefix_steps = int(prefix_steps)
         self.sigmas = _schedule_values(sigmas)
         self.video_shape = tuple(int(x) for x in video_shape)
         self.audio_shape = tuple(int(x) for x in audio_shape) if audio_shape else None
         self.seam_min = clamp_seam_min_mask(SEAM_MIN_MASK if seam_min is None else seam_min)
-        # v5 配对 token 默认全硬锁，SelfLift fuse 的行为已被涵盖；属性保留仅供日志/兼容。
-        self.selflift_fuse = bool(selflift_fuse)
         self.current_video_mask: torch.Tensor | None = None
         self.current_audio_mask: torch.Tensor | None = None
 
     def _live_weights(self, sigma, extra_options=None) -> torch.Tensor:
-        # 配对 Guide 关键帧的 token 全程 m=0 硬锁，与采样步、σ 比率无关。
-        # 前缀输入因此始终是标准 i2v carry（干净 latent + t=0.999 标签），
-        # 接缝后第一个自由 token 不会被冲突前缀污染。
-        del sigma, extra_options
-        return torch.zeros(self.prefix_steps, dtype=torch.float32)
+        current = float(torch.as_tensor(sigma).detach().float().reshape(-1)[0])
+        schedule = self.sigmas or _schedule_values((extra_options or {}).get("sigmas", ()))
+        ratio = _next_sigma_ratio(current, schedule)
+        floor = float(self.seam_min)
+        live = []
+        for base in prefix_token_weights(self.prefix_steps, seam_min=floor):
+            value = float(base) * max(0.0, float(ratio))
+            if floor > 0.0:
+                value = max(floor, value)
+            live.append(max(0.0, min(1.0, value)))
+        return torch.tensor(live, dtype=torch.float32)
 
     def _sync_shapes(self, extra_options=None) -> None:
         """Prefer the sampler's packed latent_shapes over storage-space sizes."""
@@ -513,22 +501,19 @@ def install_continue_prefix_remask(model, latent: dict, sigmas) -> Any:
             log.warning("Director continue: MODEL has no denoise-mask hook; static mask only.")
             return model
         audio_shape = tuple(streams[1].shape) if len(streams) > 1 and torch.is_tensor(streams[1]) else None
-        selflift_fuse = bool(isinstance(latent, dict) and latent.get(SELFLIFT_FUSE_KEY))
         state = _PrefixRemask(
             prefix_steps,
             sigmas,
             tuple(streams[0].shape),
             seam_min=_seam_min_from_latent(latent),
             audio_shape=audio_shape,
-            selflift_fuse=selflift_fuse,
         )
         patched.set_model_denoise_mask_function(state.denoise_mask_function)
         log.info(
-            "Director continue remask: prefix=%d hard-lock m=0 every step "
-            "(paired Guide keyframes; redraw=%.2f fingerprint-only%s)",
+            "Director continue remask: prefix=%d seam_min=%.2f "
+            "(whole prefix × next/current σ, last token stays at floor)",
             prefix_steps,
             float(state.seam_min),
-            ", SelfLift fuse 行为已涵盖" if selflift_fuse else "",
         )
         try:
             from comfy.patcher_extension import WrappersMP

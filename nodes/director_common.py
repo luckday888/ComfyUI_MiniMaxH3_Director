@@ -404,13 +404,9 @@ def _layout_image_batches(
         images_out = segment_outputs
         frame_count = sum(int(s.shape[0]) for s in segment_outputs)
         return images_out, frame_count
-    # Motion context: interior segments keep the full model-generated free
-    # region (longer than the UI segment by the grid-align remainder), so the
-    # merged clip is naturally longer than plan.total_frames. Do not crop it
-    # back to the UI total here — that cuts the ending audio fade-out and drifts
-    # out of sync with the audio concatenated at real segment lengths. The
-    # non-continuity path keeps the old behavior (crop to the UI total).
-    if getattr(plan, "continuity_enabled", False):
+    # 「保完整」segments are longer than the UI total; cropping here would
+    # cut the kept remainder and desync concatenated audio.
+    if getattr(plan, "continuity_enabled", False) and getattr(plan, "continuity_keep_tail", True):
         combined = combined.cpu().float()
     else:
         combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
@@ -435,19 +431,14 @@ def finalize_director_outputs(
 ):
     is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
     export_segments = plan.export_mode == "segments"
-    export_selection = plan.export_mode == "selection"
     video_batch = is_video_batch_task_key(plan.global_task_key)
-    # 选择导出 emits one merged clip per consecutive run-group (already built in
-    # the executor), so it uses the same list layout as 分段导出 — but without
-    # pixel-release posters (each list item is a full merged clip).
-    list_layout = export_segments or export_selection
-    split_layout = list_layout or (is_batch and not video_batch)
+    split_layout = export_segments or (is_batch and not video_batch)
 
     images_out, frame_count = _layout_image_batches(
         plan,
         combined,
         segment_outputs,
-        export_segments=list_layout,
+        export_segments=export_segments,
         is_batch=is_batch,
         video_batch=video_batch,
     )
@@ -499,7 +490,7 @@ def finalize_director_outputs(
                 plan,
                 pre_comb,
                 pre_segs,
-                export_segments=list_layout,
+                export_segments=export_segments,
                 is_batch=is_batch,
                 video_batch=video_batch,
             )
@@ -576,8 +567,6 @@ def finalize_director_outputs(
     # Prefer caller-provided export lengths (post continuity trim); else match IMAGE batches.
     if segment_frame_counts is None and segment_audios and split_for_audio:
         segment_frame_counts = [int(s.shape[0]) for s in images_out]
-    # 选择导出: one merged clip per consecutive run-group; stitch audio per group.
-    selection_groups = getattr(plan, "selection_export_groups", None) if export_selection else None
     audio_out, source_fallback = build_director_audio_outputs(
         plan,
         images_out,
@@ -586,7 +575,6 @@ def finalize_director_outputs(
         segment_audios=segment_audios if use_generated else None,
         segment_frame_counts=segment_frame_counts if use_generated else None,
         audio_mode=audio_mode,
-        export_groups=selection_groups,
     )
     report = report + source_audio_report_note(
         plan,
@@ -598,7 +586,7 @@ def finalize_director_outputs(
         source_fallback=source_fallback,
     )
 
-    split_source_outputs = list_layout or (is_batch and not video_batch)
+    split_source_outputs = export_segments or (is_batch and not video_batch)
     if export_source_images:
         try:
             source_images_out = build_source_images_output(

@@ -183,7 +183,7 @@ class SegmentRefAudio:
     """Standalone reference audio for MiniMax ``<Audio N>`` (index 0-based)."""
 
     index: int
-    audio: dict | None = None  # ComfyUI AUDIO；上传文件走 lazy，首次使用时解码
+    audio: dict | None = None  # ComfyUI AUDIO; lazy for uploaded files
     audio_file: str = ""
     audio_path: str = ""  # absolute input path; used at runtime and in cache fingerprint
 
@@ -221,20 +221,6 @@ def merge_indexed_refs(common: list, segment: list) -> list:
     return sorted(by_idx.values(), key=lambda r: int(getattr(r, "index", 0)))
 
 
-def resolve_seg_id(raw, index: int) -> str:
-    """读取段的稳定身份（timeline JSON 里持久存在的 ``id``）。
-
-    段间引导/磁盘缓存以该身份为键，因此删除前导段后保留段被重新编号（位置
-    index 改变）时，仍能找回自己的生成产物，下一段可正常接续。UI 段都带持久
-    ``id``；只有程序化、无身份来源的段才回退到 ``p<index>``（等价旧的位置键）。
-    绝不能用随机值——必须跨多次运行稳定，磁盘缓存才能跨删除/重排存活。
-    """
-    sid = ""
-    if isinstance(raw, dict):
-        sid = str(raw.get("id") or raw.get("seg_id") or "").strip()
-    return sid or f"p{int(index):04d}"
-
-
 @dataclass
 class SegmentPlan:
     index: int
@@ -259,9 +245,6 @@ class SegmentPlan:
     continuity_from_prev: bool = True
     # match | 1024 | 1280 | 1536 | max. Official node only sees match | max.
     ref_image_size: str = "match"
-    # 稳定段身份（timeline 持久 id；无来源时为 ``p<index>``）。磁盘缓存与段间
-    # 引导按它定位，避免删除前导段导致位置下标移位后错读/丢失上一段产物。
-    seg_id: str = ""
 
     @property
     def frame_count(self) -> int:
@@ -293,21 +276,15 @@ class DirectorPlan:
     raw: dict
     source_total_frames: int = 0
     export_max_frames: int = 0
-    export_mode: str = "all"  # "all" | "segments" | "selection"
+    export_mode: str = "all"  # "all" | "segments"
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
     # "guide" (motion-context keyframes) | "continue" (引导+重绘 / latent remask).
     continuity_mode: str = "guide"
-    continuity_redraw: float = 0.65
-    # Audio handoff across the seam: when False, each segment keeps its own audio
-    # (hard cut) even while video motion-context still stitches. Default True.
-    audio_continuity_enabled: bool = True
-    # Segment-continuity companion: open-loop pixel-only exposure anchor that
-    # flattens per-segment brightness drift back to the first segment's exposure.
-    # Never feeds latents/audio, so the native latent pin is unaffected.
-    exposure_anchor_enabled: bool = True
-    exposure_anchor_strength: float = 0.40  # gamma range cap [1/1+s, 1+s]; 0 = off
+    continuity_redraw: float = 0.10
+    # Keep sample-trim remainder (~12f) instead of cropping back to UI length.
+    continuity_keep_tail: bool = True
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
     # Full source-video PCM, reused only during this one Director execution and
     # freed when the run ends (replaces the old never-cleared process cache).
@@ -333,10 +310,6 @@ class DirectorPlan:
     external_groups_witness: dict | None = None
     # Set during execute when export_mode=segments (minimax_seg_export folder).
     segment_mp4_run_dir: str | None = None
-    # Set during execute when export_mode=selection: list of consecutive run-groups,
-    # each a list of positions into the run-order (run_list) segment list. One
-    # merged clip is emitted per group. Consumed by the audio-output builder.
-    selection_export_groups: list | None = None
 
     @property
     def segment_count(self) -> int:
@@ -519,7 +492,7 @@ def ensure_ref_audio_pcm(
     *,
     cache: dict | None = None,
 ) -> dict | None:
-    """首次使用时解码文件型参考音频；图接线来的 PCM 原样保留。"""
+    """Decode file-backed reference audio on first use; keep graph-wired PCM."""
     audio = item.audio
     if isinstance(audio, dict) and audio.get("waveform") is not None:
         return audio
@@ -622,19 +595,6 @@ def ref_videos_to_dict(videos: list[SegmentRefVideo]) -> dict | None:
     return ref_videos_dict([(v.index, v.tensor) for v in videos])
 
 
-# r2v 的公共参数/主体描述是纯视觉自由文本，H3 Ref2VA 在缺少明确音频约束时，
-# 会把这类描述性文字当成旁白/台词念出来（r2v 批生成又没有静音开关）。
-# 这里显式声明：描述文字仅供画面/主体参考、不得朗读；仅明确写出的台词才发声，
-# 其余只生成与画面匹配的自然环境音。与官方 r2v PE 模板「纯视觉描述→环境音」语义一致。
-R2V_NO_NARRATION_DIRECTIVE = (
-    "Audio note: the following description is visual/subject reference only. "
-    "Do not narrate, caption, or read any descriptive text aloud as voiceover. "
-    "Produce speech or singing only for dialogue that is explicitly written as such; "
-    "otherwise generate only natural ambient sound that matches the visuals."
-)
-_R2V_NO_NARRATION_MARKER = "do not narrate, caption, or read"
-
-
 def reinforce_r2v_prompt(
     prompt: str,
     *,
@@ -642,11 +602,7 @@ def reinforce_r2v_prompt(
     video_indices: list[int] | None = None,
     audio_indices: list[int] | None = None,
 ) -> str:
-    """Remind <Picture N> / <Video K> / <Audio J> when tags are missing (r2v batch).
-
-    同时在正文前插入「禁止朗读描述」音频指令，避免公共参数/主体描述被 H3 当旁白念出。
-    指令放在标签之后、正文之前，靠前置位置以规避长提示词尾部截断。
-    """
+    """Remind <Picture N> / <Video K> / <Audio J> when tags are missing (r2v batch)."""
     text = (prompt or "").strip() or "Generate a cinematic scene."
     pic_indices = sorted({int(i) for i in (ref_indices or []) if int(i) >= 0})
     vid_indices = sorted({int(i) for i in (video_indices or []) if int(i) >= 0})
@@ -658,12 +614,9 @@ def reinforce_r2v_prompt(
         prefix_parts.append(" ".join(f"<Video {i + 1}>" for i in vid_indices))
     if aud_indices and "<Audio" not in text and "<audio" not in text:
         prefix_parts.append(" ".join(f"<Audio {i + 1}>" for i in aud_indices))
-    # 已含等价指令（如用户/PE 已写明）则不重复插入。
-    if _R2V_NO_NARRATION_MARKER not in text.lower():
-        prefix_parts.append(R2V_NO_NARRATION_DIRECTIVE)
     if not prefix_parts:
         return text
-    return f"{' '.join(prefix_parts)}\n\n{text}"
+    return f"{' '.join(prefix_parts)} {text}"
 
 
 def _segment_ranges_from_timeline(timeline: dict, total: int) -> list[tuple[int, int, dict]]:
@@ -713,8 +666,6 @@ def _resolve_export_mode(output_block: dict) -> str:
     mode = str(output_block.get("exportMode") or output_block.get("export_mode") or "all").lower()
     if mode in ("segments", "segment", "per_segment", "by_segment"):
         return "segments"
-    if mode in ("selection", "selected", "select", "merge_selection", "by_selection"):
-        return "selection"
     return "all"
 
 
@@ -964,7 +915,6 @@ def build_director_plan(
                 ref_audios=seg_ref_audios,
                 reference_video_meta=seg_ref_video,
                 reference_video_start_frame=ref_start,
-                seg_id=resolve_seg_id(seg_data, idx),
             )
         )
 
@@ -979,23 +929,19 @@ def build_director_plan(
         )
 
     from .segment_continuity import (
-        resolve_audio_continuity_enabled,
+        resolve_continuity_keep_tail,
         resolve_continuity_mode,
         resolve_continuity_redraw,
         resolve_continuity_settings,
-        resolve_exposure_anchor_enabled,
-        resolve_exposure_anchor_strength,
         resolve_segment_continuity_from_prev,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
-    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     continuity_mode = resolve_continuity_mode(timeline)
     continuity_redraw = resolve_continuity_redraw(timeline)
-    exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
-    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
+    continuity_keep_tail = resolve_continuity_keep_tail(timeline)
     for seg, (_start, _end, seg_data) in zip(segments, segment_ranges):
         seg.continuity_from_prev = resolve_segment_continuity_from_prev(
             seg_data if isinstance(seg_data, dict) else {},
@@ -1027,11 +973,9 @@ def build_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
-        audio_continuity_enabled=audio_continuity_enabled,
         continuity_mode=continuity_mode,
         continuity_redraw=continuity_redraw,
-        exposure_anchor_enabled=exposure_anchor_enabled,
-        exposure_anchor_strength=exposure_anchor_strength,
+        continuity_keep_tail=continuity_keep_tail,
         global_ref_audios=global_ref_audios,
     )
 

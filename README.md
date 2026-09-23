@@ -22,11 +22,10 @@
 | **选择运行** | 开启后只采样勾选的片段/素材组；未勾选段可用缓存或源画面填充（全部导出时） |
 | **外部多组接线** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`；连入导演台 `i2v_groups` / `r2v_groups` 后外部优先覆盖 UI 素材，仍支持跑批与选择运行 |
 | **原生立体声音频** | 与画面同次采样生成；`v2v`/`rv2v` 可选生成声音 / 使用原声 / 静音 |
-| **段间引导** | 默认关闭；多段 `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v` 时可开启，将上一段生成结果的末尾运动（及生成音频）钉入下一段采样再裁掉前缀。上下文帧数：5 / 22 / 39 / 56，**默认推荐为 22**。开启后每段保留模型实际生成的完整尾部（受 17k+5 帧网格取整影响，每段约比 UI 标称时长多 0.5s），以保证句尾读音/收音不被裁掉。段缓存以时间轴**稳定段 id** 为键（旧版本按位置下标），因此删掉前面的段落后，保留段即便被重新编号也能用自身缓存接续下一段（无需重跑保留段）。连续策略分两种：**「引导」**把上段尾部作为官方 Guide 关键帧注入，前缀由模型参照关键帧重绘、采样后裁掉；**「引导+重绘」**同样注入关键帧（保证跨段连续），但配对前缀 token 直接硬锁为上段原帧（m=0，对齐 i2v 首帧 carry 的训练形态），接缝零偏差。早期「引导+重绘」按重绘幅度重画锚点 token，模型同时收到「不可改条件 + 同一画面重绘中」的训练外冲突，导致接缝后新段开头劣化、段内逐渐恢复，已修复（pipeline v5）；重绘幅度参数保留用于界面兼容和缓存指纹，不再参与采样。**感谢 [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) 提供的实现思路** |
+| **段间引导** | 默认关闭；多段 `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v` 时可开启，将上一段生成结果的末尾运动（及生成音频）钉入下一段采样再裁掉前缀。上下文帧数：5 / 22 / 39 / 56，**默认推荐为 22**。**感谢 [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) 提供的实现思路** |
 | **语义桥 (Semantic Bridge)** | 外接 **MiniMax H3 Director Semantic Bridge** 到导演台 `selflift` 上方的 `semantic_bridge` 口。未接线 = 完全相同。接线后用 student MLP 改写官方 cond token（RMS-norm → 残差混合）。权重自行放到 `models/semantic_bridge/`，本插件不分发；节点里换 adapter 即可在原版与 BUNNY 之间切换，不要串两座桥。原版偏构图/空间/计数等静态关系；BUNNY 偏动作归属与复杂多人。蒸馏于 FL2VA；`r2v` / `v2v` / `rv2v` 为强制兼容，请谨慎使用。参考 [speach1sdef178/MiniMax-H3-Semantic-Bridge](https://huggingface.co/speach1sdef178/MiniMax-H3-Semantic-Bridge)、[JOKER141/BUNNY_H3_Conditioning_Bridge](https://huggingface.co/JOKER141/BUNNY_H3_Conditioning_Bridge) |
-| **渐进一采 (SelfLift)** | 外接 **MiniMax H3 Director SelfLift** 到导演台 `selflift` 口（Refine 上方）。未接线 = 原来的单阶段一采。接线后一采变为低清前缀 + 3D lift + 高清收尾，画布仍是导演台分辨率。Euler。与「引导+重绘」同用时配对前缀 token 全部硬锁（v5：native low carry 全程是真实锚点，旧版按重绘幅度重绘锚点导致的接缝劣化已消除）。**感谢 [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) 提供的实现思路** |
+| **渐进一采 (SelfLift)** | 外接 **MiniMax H3 Director SelfLift** 到导演台 `selflift` 口（Refine 上方）。未接线 = 原来的单阶段一采。接线后一采变为低清前缀 + 3D lift + 高清收尾，画布仍是导演台分辨率。Euler。**感谢 [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) 提供的实现思路** |
 | **二采 / 放大 (Refine)** | 外接 **MiniMax H3 Director Refine** 到导演台 `refine` 口。未接线 = 原来的单次采样。`refine` = 同分辨率精修；`upscale` = 先放大到目标画布再按 SIGMAS 二采（像素插值 / RTX VSR / H3 latent）；`latent_upscale` = 只放大 H3 latent、不二采。`passes` 可多次精修（upscale 只放大一次）。可选接 `refine_model` 换二采 UNET。`images` 为二采后成片，`images_pre_refine` 为一采（放大前）画面 |
-| **多段显存稳定** | 多段采样复用同一份 MiniMaxH3 权重与同一个 SigmaShift 模型外壳（不按段复制权重、不重读磁盘）；段间引导的一次性重绘外壳会在下一段加载时由 ComfyUI 正常回收，避免节点内编排下后台刷屏 `memory leak with model MiniMaxH3` 假告警及模型登记条目堆积。默认整次运行常驻模型以保证速度；需要极致省显存可开「段间清理显存」，此时在模型仍存活时正常卸载、下段自动重载 |
 | **运行报告** | `report` 口输出分段计划、每段任务摘要 |
 | **导演包导入导出** | 工具栏「导入/导出导演包」：zip 内保存时间轴 JSON 与参考图/视频/音频。目录名为英文（`shared_params/`、`asset_groups/01/`、`Picture1`…），与切到 EN 后的界面用语对应，避免路径编码问题 |
 
@@ -164,8 +163,6 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 3. 点击「添加素材组」；每组写分镜提示词，可按需再挂本组独有素材（同槽位覆盖公共素材）
 4. 提示词中用 `<Picture N>` / `<Video K>` / `<Audio J>`，或输入 `@`（启用公共参数时可引用公共 + 本组素材）
 5. 时间轴可预览各组时长与缩略图；「选择运行」与素材组勾选同步
-
-> **音频说明（r2v）：** 公共参数与分镜里的描述文字按**画面/主体视觉参考**处理，会自动附带「禁止把描述文字当旁白/台词念出」指令——模型只生成与画面匹配的自然环境音，不会把角色描述朗读出来；只有**明确写出的台词**才会被念出。r2v 批生成无静音开关，需要完全无声请改用 `v2v`/`rv2v` 的「静音」模式。
 
 ### 源视频 v2v / rv2v 用法摘要
 

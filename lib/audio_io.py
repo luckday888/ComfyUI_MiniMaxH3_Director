@@ -339,9 +339,8 @@ def _load_full_audio(
 ) -> dict[str, Any] | None:
     """Decode a complete audio stream, optionally reusing a caller-owned cache.
 
-    No process-wide PCM cache: a process-level dict that is never cleared leaks
-    every decoded source across runs. Callers that slice the same source during
-    one Director execution pass an execution-scoped ``cache`` (freed at run end).
+    No process-wide PCM cache: callers that slice the same source during one
+    Director execution may pass an execution-scoped ``cache``.
     """
     if cache is not None:
         cached = cache.get(path)

@@ -6,7 +6,7 @@ import logging
 
 import torch
 
-from ..h3_latent_continue import CONTINUE_SEAM_KEY, PREFIX_STEPS_KEY, SELFLIFT_FUSE_KEY
+from ..h3_latent_continue import CONTINUE_SEAM_KEY, PREFIX_STEPS_KEY
 from ..h3_motion_context import (
     AUDIO_HZ,
     FPS,
@@ -231,8 +231,6 @@ def lock_prefix_keep_mask(latent: dict, prefix_steps: int) -> dict:
     mask = out.get("noise_mask")
     if mask is None:
         return out
-    # 通知 remask：SelfLift head token 保持硬锁，仅 taper 区参与重绘
-    out[SELFLIFT_FUSE_KEY] = True
 
     def _zero_video(video: torch.Tensor) -> torch.Tensor:
         work = video.clone()

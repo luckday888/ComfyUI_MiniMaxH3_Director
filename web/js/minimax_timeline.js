@@ -161,41 +161,19 @@ function isContinuityEnabled(output) {
     return false;
 }
 
-/** Exposure anchor (segment-continuity companion): default on; only explicit off is false. */
-function isExposureAnchorEnabled(output) {
+function isContinuityKeepTail(output) {
     if (!output) return true;
-    const raw = output.exposureAnchorEnabled ?? output.exposure_anchor_enabled;
-    if (raw == null) return true;
+    const raw = output.continuityKeepTail ?? output.continuity_keep_tail;
+    if (raw === undefined || raw === null) return true;
+    if (raw === true || raw === 1) return true;
     if (raw === false || raw === 0) return false;
     if (typeof raw === "string") {
         const s = raw.trim().toLowerCase();
-        return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+        if (s === "") return true;
+        if (s === "false" || s === "0" || s === "no" || s === "off") return false;
+        return true;
     }
     return true;
-}
-
-/** Audio continuity (segment companion): default on; only explicit off is false. */
-function isAudioContinuityEnabled(output) {
-    if (!output) return true;
-    const raw = output.audioContinuityEnabled ?? output.audio_continuity_enabled;
-    if (raw == null) return true;
-    if (raw === false || raw === 0) return false;
-    if (typeof raw === "string") {
-        const s = raw.trim().toLowerCase();
-        return s !== "false" && s !== "0" && s !== "no" && s !== "off" && s !== "";
-    }
-    return true;
-}
-
-/** Exposure anchor strength (percent 0–60, default 40). Tolerates legacy fractions (0.4). */
-function getExposureAnchorStrength(output) {
-    if (!output) return 40;
-    let raw = output.exposureAnchorStrength ?? output.exposure_anchor_strength;
-    if (raw == null || raw === "") return 40;
-    let n = Number(raw);
-    if (!Number.isFinite(n)) return 40;
-    if (n > 0 && n < 1) n = n * 100; // 0.4 → 40
-    return Math.max(0, Math.min(60, Math.round(n)));
 }
 
 /** Whether段间引导 controls apply for the current task + segment count. */
@@ -222,8 +200,8 @@ const CONTINUITY_FRAME_CHOICES = [5, 22, 39, 56];
 /** Official Motion Context baseline recommendation. */
 const DEFAULT_CONTINUITY_FRAMES = 22;
 const DEFAULT_CONTINUITY_MODE = "guide";
-const DEFAULT_CONTINUITY_REDRAW = 0.65;
-const MIN_CONTINUITY_REDRAW = 0.40;
+const DEFAULT_CONTINUITY_REDRAW = 0.10;
+const MIN_CONTINUITY_REDRAW = 0;
 const MAX_CONTINUITY_REDRAW = 0.95;
 
 function normalizeContinuityMode(raw) {
@@ -271,13 +249,11 @@ function normalizeOutputContinuity(output = {}) {
         ...output,
         continuityEnabled: isContinuityEnabled(output),
         continuityOverlapFrames: snapContinuityFrames(rawOverlap),
-        exposureAnchorEnabled: isExposureAnchorEnabled(output),
-        exposureAnchorStrength: getExposureAnchorStrength(output),
-        audioContinuityEnabled: isAudioContinuityEnabled(output),
         continuityMode: normalizeContinuityMode(output.continuityMode ?? output.continuity_mode),
         continuityRedraw: snapContinuityRedraw(
             output.continuityRedraw ?? output.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
         ),
+        continuityKeepTail: isContinuityKeepTail(output),
         audioMode: normalizeAudioMode(output.audioMode ?? output.audio_mode),
         refImageSize: normalizeRefImageSize(output.refImageSize ?? output.ref_image_size),
     };
@@ -1126,19 +1102,6 @@ const STYLES = `
 .bd-live-sample-badge{position:absolute;left:10px;bottom:10px;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.75);color:#cfcfcf;font-size:11px;pointer-events:none}
 .bd-live-sample-badge.hidden{display:none!important}
 .bd-main>.bd-live-sample{margin:0 0 4px}
-.bd-output .bd-btn-live-audio{background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px;margin-left:6px}
-.bd-output .bd-btn-live-audio:hover{background:#2a2a2a;border-color:#555;color:#ddd}
-.bd-output .bd-btn-live-audio.active{background:#16283a;color:#5bc8ff;border-color:#5bc8ff;box-shadow:0 0 0 1px rgba(91,200,255,.35)}
-.bd-output .bd-btn-live-audio:disabled{opacity:.4;cursor:not-allowed}
-.bd-live-audio{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:6px;padding:8px 12px;background:linear-gradient(165deg,#1a1a1a 0%,#121212 100%);border:1px solid #333;border-radius:10px;flex-shrink:0;margin:0 0 4px}
-.bd-live-audio.hidden{display:none!important}
-.bd-live-audio-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.bd-live-audio-head b{color:#f0f0f0;font-size:12px;font-weight:650;letter-spacing:.02em}
-.bd-live-audio-head .bd-meta{color:#888;font-size:11px}
-.bd-live-audio-body{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.bd-live-audio-play{background:#222;border:1px solid #444;color:#ddd;border-radius:6px;padding:4px 14px;font-size:12px;cursor:pointer;white-space:nowrap}
-.bd-live-audio-play:hover{background:#2a2a2a;border-color:#666}
-.bd-live-audio-step{color:#5bc8ff;font-size:11px}
 .bd-run-select-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:#aaa}
 .bd-run-select-all-wrap{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none;margin-left:2px}
 .bd-run-select-all-wrap.hidden{display:none!important}
@@ -1956,11 +1919,11 @@ function parseTimeline(raw, totalFrames, fps) {
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         },
         runSelectEnabled: false,
         runSelection: [],
         liveTaePreview: false,
-        liveAudioPreview: false,
         batchDetailMode: "solo",
         segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], refAudios: [], referenceVideo: {} }],
     };
@@ -2025,12 +1988,9 @@ function parseTimeline(raw, totalFrames, fps) {
             refImageSize: normalizeRefImageSize(data.output?.refImageSize ?? data.output?.ref_image_size),
             continuityEnabled: data.output?.continuityEnabled ?? data.output?.continuity_enabled,
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
-            exposureAnchorEnabled: data.output?.exposureAnchorEnabled ?? data.output?.exposure_anchor_enabled,
-            exposureAnchorStrength: data.output?.exposureAnchorStrength ?? data.output?.exposure_anchor_strength,
-            // 音频接续开关：此前漏读，刷新/重载后被回落为默认开启，导致用户取消勾选后再次自动勾选
-            audioContinuityEnabled: data.output?.audioContinuityEnabled ?? data.output?.audio_continuity_enabled,
             continuityMode: data.output?.continuityMode ?? data.output?.continuity_mode,
             continuityRedraw: data.output?.continuityRedraw ?? data.output?.continuity_redraw,
+            continuityKeepTail: data.output?.continuityKeepTail ?? data.output?.continuity_keep_tail,
         });
         // Infer aspectRatio from saved width/height when older payloads omitted the label.
         if (!data.output.aspectRatio && data.output.width > 0 && data.output.height > 0) {
@@ -2073,8 +2033,6 @@ function parseTimeline(raw, totalFrames, fps) {
         data.runSelection = Array.isArray(data.runSelection) ? data.runSelection.map((i) => parseInt(i, 10)).filter((i) => i >= 0) : [];
         // Default off when missing. Explicit true keeps in-node TAE + segment playback.
         data.liveTaePreview = data.liveTaePreview === true || data.live_tae_preview === true;
-        // In-sampling audio preview (manual listen). Default off; generate-audio only.
-        data.liveAudioPreview = data.liveAudioPreview === true || data.live_audio_preview === true;
         const detailMode = data.batchDetailMode ?? data.batch_detail_mode;
         data.batchDetailMode = detailMode === "all" ? "all" : "solo";
         if (data.timelineMode === "fl2v" || resolveTaskKey(data.global?.taskType || "") === "fl2v") {
@@ -2974,9 +2932,6 @@ class MiniMaxH3DirectorEditor {
                     <option value="mute" data-i18n="output.audio.mute">静音</option>
                 </select>
             </span>
-            <span class="bd-out-audio-wrap hidden" data-r="audio-continuity-wrap" data-i18n-title="tooltip.audioContinuity">
-                <label style="white-space:nowrap"><input type="checkbox" data-r="audio-continuity-cb" checked><span data-i18n="output.audioContinuity">音频接续</span></label>
-            </span>
             <span class="bd-out-source-wrap hidden" data-r="out-source-wrap" data-i18n-title="widget.tooltip.exportSourceImages">
                 <label>
                     <input type="checkbox" data-r="out-export-source">
@@ -2995,7 +2950,6 @@ class MiniMaxH3DirectorEditor {
             <select class="bd-select" data-r="out-export-mode" data-i18n-title="tooltip.exportMode">
                 <option value="all" data-i18n="output.exportMode.all">全部导出</option>
                 <option value="segments" data-i18n="output.exportMode.segments">分段导出</option>
-                <option value="selection" data-i18n="output.exportMode.selection">选择导出</option>
             </select>
             <span class="hidden" data-r="out-max-frames-wrap" hidden aria-hidden="true">
                 <label data-i18n="output.maxFrames">最大帧数</label>
@@ -3010,11 +2964,6 @@ class MiniMaxH3DirectorEditor {
                     <option value="39">39</option>
                     <option value="56">56</option>
                 </select>
-                <label data-i18n-title="tooltip.exposureAnchor" style="margin-left:6px;white-space:nowrap"><input type="checkbox" data-r="exposure-anchor-cb" checked><span data-i18n="output.exposureAnchor">曝光锚定</span></label>
-                <span data-r="exposure-anchor-strength-wrap" style="display:inline-flex;align-items:center;gap:2px;white-space:nowrap" data-i18n-title="tooltip.exposureAnchorStrength">
-                    <input type="range" data-r="exposure-anchor-strength" min="0" max="60" step="1" value="40" style="width:64px">
-                    <span class="bd-meta" data-r="exposure-anchor-strength-val">40%</span>
-                </span>
                 <span data-r="segment-continuity-mode-wrap" hidden>
                     <span class="bd-meta" data-i18n="output.continuityMode">引导方式</span>
                     <select class="bd-num" data-r="segment-continuity-mode" style="width:96px" data-i18n-title="tooltip.continuityMode">
@@ -3023,12 +2972,15 @@ class MiniMaxH3DirectorEditor {
                     </select>
                     <span data-r="segment-continuity-redraw-wrap" hidden>
                         <span class="bd-meta" data-i18n="output.continuityRedraw">重绘幅度</span>
-                        <input type="number" class="bd-num" data-r="segment-continuity-redraw" min="0.40" max="0.95" step="0.05" value="0.65" style="width:56px" data-i18n-title="tooltip.continuityRedraw">
+                        <input type="number" class="bd-num" data-r="segment-continuity-redraw" min="0" max="0.95" step="0.05" value="0.10" style="width:56px" data-i18n-title="tooltip.continuityRedraw">
                     </span>
                 </span>
+                <label data-r="segment-continuity-keep-tail-wrap" hidden data-i18n-title="tooltip.continuityKeepTail">
+                    <input type="checkbox" data-r="segment-continuity-keep-tail" checked>
+                    <span data-i18n="output.continuityKeepTail">保完整</span>
+                </label>
             </span>
-            <button type="button" class="bd-btn bd-btn-live-preview" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>
-            <button type="button" class="bd-btn bd-btn-live-audio" data-a="live-audio-preview" data-i18n="toolbar.liveAudioPreview" data-i18n-title="tooltip.liveAudioPreview">音频预览</button>`;
+            <button type="button" class="bd-btn bd-btn-live-preview" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
         this.outputBarEl = outputBar;
 
@@ -3052,32 +3004,6 @@ class MiniMaxH3DirectorEditor {
         this.liveSampleBadge = liveSample.querySelector('[data-r="live-sample-badge"]');
         this.liveSampleMeta = liveSample.querySelector('[data-r="live-sample-meta"]');
         this._liveSampleHost = "main";
-
-        // Independent in-sampling audio preview bar (manual listen). Kept separate
-        // from the video .bd-live-sample panel because that panel only shows for
-        // v2v-family tasks, while t2v (text-to-video) is the main audio-generation case.
-        const liveAudio = document.createElement("div");
-        liveAudio.className = "bd-live-audio hidden";
-        liveAudio.setAttribute("data-r", "live-audio");
-        liveAudio.innerHTML = `
-            <div class="bd-live-audio-head">
-                <b data-i18n="liveSample.audioTitle">音频试听</b>
-                <span class="bd-meta" data-r="live-audio-meta" data-i18n="liveSample.audioIdle">开启「音频预览」后，采样后期可点 ▶ 试听当前步生成的音频</span>
-            </div>
-            <div class="bd-live-audio-body">
-                <button type="button" class="bd-btn bd-live-audio-play" data-r="live-audio-play" data-i18n="liveSample.audioPlay">▶ 试听</button>
-                <span class="bd-meta bd-live-audio-step" data-r="live-audio-step"></span>
-                <audio class="bd-r2v-media" data-r="live-audio-tag" preload="auto"></audio>
-            </div>`;
-        this.mainBody.appendChild(liveAudio);
-        this.liveAudioEl = liveAudio;
-        this.liveAudioTag = liveAudio.querySelector('[data-r="live-audio-tag"]');
-        this.liveAudioPlay = liveAudio.querySelector('[data-r="live-audio-play"]');
-        this.liveAudioMeta = liveAudio.querySelector('[data-r="live-audio-meta"]');
-        this.liveAudioStep = liveAudio.querySelector('[data-r="live-audio-step"]');
-        if (this.liveAudioTag && this.liveAudioPlay) {
-            bindR2vMediaPlayback(this.liveAudioTag, this.liveAudioPlay);
-        }
 
         const bottom = document.createElement("div");
         bottom.className = "bd-split";
@@ -3354,8 +3280,6 @@ class MiniMaxH3DirectorEditor {
         this.fpsInput = this.root.querySelector('[data-r="timeline-fps"]');
         this.outAudioWrap = this.root.querySelector('[data-r="out-audio-wrap"]');
         this.outAudioMode = this.root.querySelector('[data-r="out-audio-mode"]');
-        this.audioContinuityWrap = this.root.querySelector('[data-r="audio-continuity-wrap"]');
-        this.audioContinuityCb = this.root.querySelector('[data-r="audio-continuity-cb"]');
         this.exportSourceImagesWrap = this.root.querySelector('[data-r="out-source-wrap"]');
         this.exportSourceImagesCb = this.root.querySelector('[data-r="out-export-source"]');
         this.exportPreFaceRefineWrap = this.root.querySelector('[data-r="out-preface-wrap"]');
@@ -3365,13 +3289,12 @@ class MiniMaxH3DirectorEditor {
         this.segmentContinuityWrap = this.root.querySelector('[data-r="segment-continuity-wrap"]');
         this.segmentContinuityCb = this.root.querySelector('[data-r="segment-continuity-cb"]');
         this.segmentContinuityOverlap = this.root.querySelector('[data-r="segment-continuity-overlap"]');
-        this.exposureAnchorCb = this.root.querySelector('[data-r="exposure-anchor-cb"]');
-        this.exposureAnchorStrength = this.root.querySelector('[data-r="exposure-anchor-strength"]');
-        this.exposureAnchorStrengthVal = this.root.querySelector('[data-r="exposure-anchor-strength-val"]');
         this.segmentContinuityModeWrap = this.root.querySelector('[data-r="segment-continuity-mode-wrap"]');
         this.segmentContinuityMode = this.root.querySelector('[data-r="segment-continuity-mode"]');
         this.segmentContinuityRedrawWrap = this.root.querySelector('[data-r="segment-continuity-redraw-wrap"]');
         this.segmentContinuityRedraw = this.root.querySelector('[data-r="segment-continuity-redraw"]');
+        this.segmentContinuityKeepTailWrap = this.root.querySelector('[data-r="segment-continuity-keep-tail-wrap"]');
+        this.segmentContinuityKeepTail = this.root.querySelector('[data-r="segment-continuity-keep-tail"]');
         this.outPreview = this.root.querySelector('[data-r="out-preview"]');
         this.runStatusEl = this.root.querySelector('[data-r="run-status"]');
         this.runTitleEl = this.root.querySelector('[data-r="run-title"]');
@@ -3429,13 +3352,10 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
         bind('[data-a="live-tae-preview"]', () => this.toggleLiveTaePreview());
-        bind('[data-a="live-audio-preview"]', () => this.toggleLiveAudioPreview());
         bind('[data-a="frame-prev"]', () => this.stepFrame(-1));
         bind('[data-a="frame-next"]', () => this.stepFrame(1));
         this.refreshLiveTaePreviewButton();
         this.updateLiveSamplePanel();
-        this.refreshLiveAudioPreviewButton();
-        this.updateLiveAudioBar();
 
         this.seekBar.oninput = () => {
             this.seekToFrame(+this.seekBar.value, { fromUi: true });
@@ -3640,14 +3560,7 @@ class MiniMaxH3DirectorEditor {
         this.outMaxFrames.onchange = () => this.onOutputField("maxExportFrames", +this.outMaxFrames.value);
         this.outExportMode.onchange = () => this.onOutputField("exportMode", this.outExportMode.value);
         if (this.outAudioMode) {
-            this.outAudioMode.onchange = () => {
-                this.onOutputField("audioMode", this.outAudioMode.value);
-                this.updateAudioContinuityUI();
-            };
-        }
-        if (this.audioContinuityCb) {
-            this.audioContinuityCb.onchange = () =>
-                this.onOutputField("audioContinuityEnabled", !!this.audioContinuityCb.checked);
+            this.outAudioMode.onchange = () => this.onOutputField("audioMode", this.outAudioMode.value);
         }
         if (this.exportSourceImagesCb) {
             this.exportSourceImagesCb.onchange = () => {
@@ -3688,29 +3601,6 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityOverlap.addEventListener("keydown", (e) => e.stopPropagation());
             this.segmentContinuityOverlap.addEventListener("keyup", (e) => e.stopPropagation());
         }
-        if (this.exposureAnchorCb) {
-            this.exposureAnchorCb.onchange = () => {
-                this.onOutputField("exposureAnchorEnabled", this.exposureAnchorCb.checked);
-                this.updateSegmentContinuityUI();
-            };
-        }
-        if (this.exposureAnchorStrength) {
-            const syncStrengthLabel = () => {
-                if (this.exposureAnchorStrengthVal) {
-                    this.exposureAnchorStrengthVal.textContent = `${+this.exposureAnchorStrength.value}%`;
-                }
-            };
-            this.exposureAnchorStrength.oninput = () => {
-                syncStrengthLabel();
-                this.onOutputField("exposureAnchorStrength", +this.exposureAnchorStrength.value);
-            };
-            this.exposureAnchorStrength.onchange = () => {
-                syncStrengthLabel();
-                this.onOutputField("exposureAnchorStrength", +this.exposureAnchorStrength.value);
-            };
-            this.exposureAnchorStrength.addEventListener("keydown", (e) => e.stopPropagation());
-            this.exposureAnchorStrength.addEventListener("keyup", (e) => e.stopPropagation());
-        }
         if (this.segmentContinuityMode) {
             this.segmentContinuityMode.onchange = () => {
                 this.onOutputField("continuityMode", this.segmentContinuityMode.value);
@@ -3726,6 +3616,11 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityRedraw.onchange = applyRedraw;
             this.segmentContinuityRedraw.addEventListener("keydown", (e) => e.stopPropagation());
             this.segmentContinuityRedraw.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.segmentContinuityKeepTail) {
+            this.segmentContinuityKeepTail.onchange = () => {
+                this.onOutputField("continuityKeepTail", this.segmentContinuityKeepTail.checked);
+            };
         }
         if (this.segContinuityFromPrevCb) {
             this.segContinuityFromPrevCb.onchange = () => {
@@ -4244,12 +4139,10 @@ class MiniMaxH3DirectorEditor {
 
     toggleSegmentRun(index) {
         if (!this.isRunSelectEnabled()) return;
-        if (this.isFl2vMode()) {
-            if (!this.timeline.segments?.[index]?.isStartFrame) return;
-        } else {
-            const n = this.getRunnableSegmentCount();
-            if (index < 0 || index >= n) return;
-        }
+        // fl2v: every shot is runnable (text-only / end-only groups too), so
+        // never gate on isStartFrame — that only means "has a start image".
+        const n = this.getRunnableSegmentCount();
+        if (index < 0 || index >= n) return;
         const sel = new Set(this.timeline.runSelection || []);
         if (sel.has(index)) sel.delete(index);
         else sel.add(index);
@@ -4335,12 +4228,9 @@ class MiniMaxH3DirectorEditor {
             this.runSelectSummary.style.color = "#aaa";
         } else {
             const nums = (this.timeline.runSelection || []).map((i) => i + 1).join(", ");
-            const runExportMode = this.timeline.output?.exportMode;
-            const exportHint = runExportMode === "segments"
+            const exportHint = this.timeline.output?.exportMode === "segments"
                 ? t("runSelect.exportOnlyChecked")
-                : runExportMode === "selection"
-                    ? t("runSelect.exportSelection")
-                    : t("runSelect.fillUnchecked");
+                : t("runSelect.fillUnchecked");
             this.runSelectSummary.textContent = count === 1
                 ? t("runSelect.sampleOne", { unit: label, nums, hint: exportHint })
                 : t("runSelect.sampleMany", { count, unit: label, nums, hint: exportHint });
@@ -6237,8 +6127,6 @@ class MiniMaxH3DirectorEditor {
         this.refreshLoopButtonTitle?.();
         this.refreshLiveTaePreviewButton?.();
         this.updateLiveSamplePanel?.();
-        this.refreshLiveAudioPreviewButton?.();
-        this.updateLiveAudioBar?.();
         this.syncTimelineZoomUI?.();
         this.syncExternalGroupsTimeline?.();
         updateFl2vDetailUI?.(this);
@@ -6321,10 +6209,9 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
-            exposureAnchorEnabled: true, exposureAnchorStrength: 40,
-            audioContinuityEnabled: true,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         };
         // Prefer ResolutionSelector fields; backfill from width/height when missing.
         // Custom keeps explicit width/height and does not recompute from megapixels.
@@ -6359,10 +6246,7 @@ class MiniMaxH3DirectorEditor {
         if (this.outW) this.outW.value = String(out.width ?? 864);
         if (this.outH) this.outH.value = String(out.height ?? 480);
         if (this.outMaxFrames) this.outMaxFrames.value = String(out.maxExportFrames ?? 0);
-        if (this.outExportMode) {
-            const em = out.exportMode === "segments" || out.exportMode === "selection" ? out.exportMode : "all";
-            this.outExportMode.value = em;
-        }
+        if (this.outExportMode) this.outExportMode.value = out.exportMode === "segments" ? "segments" : "all";
         if (this.outAudioMode) {
             const am = normalizeAudioMode(out.audioMode);
             this.outAudioMode.value = am;
@@ -6371,18 +6255,11 @@ class MiniMaxH3DirectorEditor {
                 this.timeline.output = { ...out };
             }
         }
-        if (this.audioContinuityCb) this.audioContinuityCb.checked = isAudioContinuityEnabled(out);
         if (this.segmentContinuityCb) this.segmentContinuityCb.checked = isContinuityEnabled(out);
         if (this.segmentContinuityOverlap) {
             this.segmentContinuityOverlap.value = String(
                 snapContinuityFrames(out.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES),
             );
-        }
-        if (this.exposureAnchorCb) this.exposureAnchorCb.checked = isExposureAnchorEnabled(out);
-        if (this.exposureAnchorStrength) {
-            const s = getExposureAnchorStrength(out);
-            this.exposureAnchorStrength.value = String(s);
-            if (this.exposureAnchorStrengthVal) this.exposureAnchorStrengthVal.textContent = `${s}%`;
         }
         if (this.segmentContinuityMode) {
             this.segmentContinuityMode.value = normalizeContinuityMode(out.continuityMode);
@@ -6392,10 +6269,12 @@ class MiniMaxH3DirectorEditor {
                 snapContinuityRedraw(out.continuityRedraw ?? DEFAULT_CONTINUITY_REDRAW),
             );
         }
+        if (this.segmentContinuityKeepTail) {
+            this.segmentContinuityKeepTail.checked = isContinuityKeepTail(out);
+        }
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
         this.updateSegmentContinuityUI();
-        this.updateAudioContinuityUI();
         this.syncExportSourceImagesUI();
         this.syncExportPreFaceRefineUI();
         this.updateOutputPreview();
@@ -6449,19 +6328,6 @@ class MiniMaxH3DirectorEditor {
             // Keep DOM aligned with timeline; eligibility only gates visibility.
             this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
         }
-        if (this.exposureAnchorCb && this.timeline?.output) {
-            this.exposureAnchorCb.checked = isExposureAnchorEnabled(this.timeline.output);
-        }
-        if (this.exposureAnchorStrength && this.timeline?.output) {
-            const s = getExposureAnchorStrength(this.timeline.output);
-            this.exposureAnchorStrength.value = String(s);
-            if (this.exposureAnchorStrengthVal) this.exposureAnchorStrengthVal.textContent = `${s}%`;
-            const on = isExposureAnchorEnabled(this.timeline.output);
-            this.exposureAnchorStrength.disabled = !on;
-            if (this.exposureAnchorStrengthVal) {
-                this.exposureAnchorStrengthVal.style.opacity = on ? "" : "0.4";
-            }
-        }
         const masterOn = show && isContinuityEnabled(this.timeline?.output);
         if (this.segmentContinuityModeWrap) {
             this.segmentContinuityModeWrap.hidden = !masterOn;
@@ -6486,25 +6352,18 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityRedraw.value = String(redraw);
             this.timeline.output.continuityRedraw = redraw;
         }
+        if (this.segmentContinuityKeepTailWrap) {
+            this.segmentContinuityKeepTailWrap.hidden = !masterOn;
+            this.segmentContinuityKeepTailWrap.setAttribute("aria-hidden", masterOn ? "false" : "true");
+            this.segmentContinuityKeepTailWrap.title = masterOn ? t("tooltip.continuityKeepTail") : "";
+        }
+        if (this.segmentContinuityKeepTail && this.timeline?.output) {
+            const keepTail = isContinuityKeepTail(this.timeline.output);
+            this.segmentContinuityKeepTail.checked = keepTail;
+            this.timeline.output.continuityKeepTail = keepTail;
+        }
         this.syncSegmentContinuityFromPrevUI();
         this.syncSegmentRefImageSizeUI();
-    }
-
-    /** 音频接续 toggle: only relevant for multi-segment runs with audible audio. */
-    updateAudioContinuityUI() {
-        if (!this.audioContinuityWrap) return;
-        const audioMode = normalizeAudioMode(this.timeline?.output?.audioMode);
-        const show = isContinuityEligible(this) && audioMode !== "mute";
-        this.audioContinuityWrap.classList.toggle("hidden", !show);
-        this.audioContinuityWrap.hidden = !show;
-        this.audioContinuityWrap.setAttribute("aria-hidden", show ? "false" : "true");
-        if (this.audioContinuityCb && this.timeline?.output) {
-            // Eligibility only gates visibility; keep DOM aligned with saved preference.
-            this.audioContinuityCb.checked = isAudioContinuityEnabled(this.timeline.output);
-        }
-        // Audio preview availability follows the audio mode (generate only).
-        this.refreshLiveAudioPreviewButton?.();
-        this.updateLiveAudioBar?.();
     }
 
     /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */
@@ -6704,12 +6563,9 @@ class MiniMaxH3DirectorEditor {
 
     _exportPreviewSuffix() {
         const cap = this.getMaxExportFrames();
-        const previewExportMode = this.timeline.output?.exportMode;
-        const exportMode = previewExportMode === "segments"
+        const exportMode = this.timeline.output?.exportMode === "segments"
             ? t("output.preview.segmentExport")
-            : previewExportMode === "selection"
-                ? t("output.preview.selectionExport")
-                : "";
+            : "";
         const dur = this.getTimelineDurationSec().toFixed(2);
         const fps = formatProbeFps(this.getFrameRate());
         const timeHint = t("output.preview.timeFps", { dur, fps });
@@ -6733,10 +6589,9 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
-            exposureAnchorEnabled: true, exposureAnchorStrength: 40,
-            audioContinuityEnabled: true,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         };
         if (key === "aspectRatio") {
             if (isCustomAspectRatio(value)) {
@@ -6782,26 +6637,19 @@ class MiniMaxH3DirectorEditor {
             const n = parseInt(value, 10);
             this.timeline.output.maxExportFrames = Number.isFinite(n) && n > 0 ? n : 0;
         } else if (key === "exportMode") {
-            this.timeline.output.exportMode =
-                value === "segments" || value === "selection" ? value : "all";
+            this.timeline.output.exportMode = value === "segments" ? "segments" : "all";
         } else if (key === "audioMode") {
             this.timeline.output.audioMode = normalizeAudioMode(value);
-        } else if (key === "audioContinuityEnabled") {
-            this.timeline.output.audioContinuityEnabled = !!value;
         } else if (key === "continuityEnabled") {
             this.timeline.output.continuityEnabled = !!value;
         } else if (key === "continuityOverlapFrames") {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(value);
-        } else if (key === "exposureAnchorEnabled") {
-            this.timeline.output.exposureAnchorEnabled = !!value;
-        } else if (key === "exposureAnchorStrength") {
-            let n = Math.round(Number(value) || 0);
-            if (n > 0 && n < 1) n = Math.round(n * 100);
-            this.timeline.output.exposureAnchorStrength = Math.max(0, Math.min(60, n));
         } else if (key === "continuityMode") {
             this.timeline.output.continuityMode = normalizeContinuityMode(value);
         } else if (key === "continuityRedraw") {
             this.timeline.output.continuityRedraw = snapContinuityRedraw(value);
+        } else if (key === "continuityKeepTail") {
+            this.timeline.output.continuityKeepTail = !!value;
         }
         this.syncOutputUIFromTimeline();
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
@@ -6883,11 +6731,11 @@ class MiniMaxH3DirectorEditor {
             continuityOverlapFrames: snapContinuityFrames(
                 prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
             ),
-            audioContinuityEnabled: isAudioContinuityEnabled(prevOut),
             continuityMode: normalizeContinuityMode(prevOut.continuityMode),
             continuityRedraw: snapContinuityRedraw(
                 prevOut.continuityRedraw ?? prevOut.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
             ),
+            continuityKeepTail: isContinuityKeepTail(prevOut),
         };
         if (this.widthWidget) this.widthWidget.value = resolved.width;
         if (this.heightWidget) this.heightWidget.value = resolved.height;
@@ -6917,10 +6765,9 @@ class MiniMaxH3DirectorEditor {
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
-            exposureAnchorEnabled: true, exposureAnchorStrength: 40,
-            audioContinuityEnabled: true,
             continuityMode: DEFAULT_CONTINUITY_MODE,
             continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         };
         if (this.timeline.output.audioMode == null) {
             this.timeline.output.audioMode = "generate";
@@ -6949,11 +6796,6 @@ class MiniMaxH3DirectorEditor {
             // Normalize stored flag without clearing preference while ineligible.
             this.timeline.output.continuityEnabled = isContinuityEnabled(this.timeline.output);
         }
-        // 音频接续配套开关：与总开关一致，合格时从 DOM 回读用户选择；不合格时保留已存偏好
-        // （缺失默认开启）。此前缺少这段回读，output 一旦按默认值重建就会丢掉用户的取消勾选。
-        if (continuityEligible && this.audioContinuityCb) {
-            this.timeline.output.audioContinuityEnabled = !!this.audioContinuityCb.checked;
-        }
         if (continuityEligible && this.segmentContinuityOverlap) {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
                 this.segmentContinuityOverlap.value
@@ -6964,20 +6806,6 @@ class MiniMaxH3DirectorEditor {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
                 this.timeline.output.continuityOverlapFrames,
             );
-        }
-        // Exposure anchor: read from DOM when eligible; otherwise keep the stored
-        // preference (missing defaults to on / 40%).
-        if (continuityEligible && this.exposureAnchorCb) {
-            this.timeline.output.exposureAnchorEnabled = !!this.exposureAnchorCb.checked;
-        } else if (this.timeline.output.exposureAnchorEnabled == null) {
-            this.timeline.output.exposureAnchorEnabled = true;
-        }
-        if (continuityEligible && this.exposureAnchorStrength) {
-            this.timeline.output.exposureAnchorStrength = getExposureAnchorStrength({
-                exposureAnchorStrength: this.exposureAnchorStrength.value,
-            });
-        } else if (this.timeline.output.exposureAnchorStrength == null) {
-            this.timeline.output.exposureAnchorStrength = 40;
         }
         if (continuityEligible && this.segmentContinuityMode) {
             this.timeline.output.continuityMode = normalizeContinuityMode(
@@ -6999,6 +6827,11 @@ class MiniMaxH3DirectorEditor {
                 this.timeline.output.continuityRedraw,
             );
         }
+        if (continuityEligible && this.segmentContinuityKeepTail) {
+            this.timeline.output.continuityKeepTail = !!this.segmentContinuityKeepTail.checked;
+        } else {
+            this.timeline.output.continuityKeepTail = isContinuityKeepTail(this.timeline.output);
+        }
         this.syncOutputToWidgets();
     }
 
@@ -7008,7 +6841,6 @@ class MiniMaxH3DirectorEditor {
         if (this.isRunSelectEnabled()) this.normalizeRunSelection();
         this.updateRunSelectUI();
         this.updateSegmentContinuityUI();
-        this.updateAudioContinuityUI();
         if (this.taskTypeWidget) this.taskTypeWidget.value = this.timeline.global.taskType;
         if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt;
         if (this.negativePromptWidget) {
@@ -9144,7 +8976,6 @@ class MiniMaxH3DirectorEditor {
         // in run-select mode; keeps hit type accurate for cursor / future hooks).
         if (this.isRunSelectEnabled() && this.getRunnableSegmentCount() >= 2 && y >= TRACK_Y && y <= trackBottom) {
             for (let i = segs.length - 1; i >= 0; i--) {
-                if (this.isFl2vMode() && !segs[i]?.isStartFrame) continue;
                 const g = this._runCheckGeometry(segs[i], width);
                 if (x >= g.hitX0 && x <= g.hitX1 && y >= g.hitY0 && y <= g.hitY1) {
                     return { type: "run-check", index: i };
@@ -10630,11 +10461,10 @@ class MiniMaxH3DirectorEditor {
             const sel = showSegSel && i === this.selectedIndex;
             const running = i === this._runHighlightSeg;
             const runOn = this.isSegmentRunEnabled(i);
-            const fl2vStart = !this.isFl2vMode() || !!seg.isStartFrame;
             const visualRank = this._visualRankFromArrayIndex(i);
             const isDragSource = reordering && visualRank === dragFromRank;
             const isDropTarget = reordering && dropRank >= 0 && visualRank === dropRank && dropRank !== dragFromRank;
-            if (this.isRunSelectEnabled() && this.getRunnableSegmentCount() >= 2 && fl2vStart && !runOn) {
+            if (this.isRunSelectEnabled() && this.getRunnableSegmentCount() >= 2 && !runOn) {
                 this.ctx.globalAlpha = 0.32;
             } else if (isDragSource) {
                 this.ctx.globalAlpha = 0.28;
@@ -10709,7 +10539,6 @@ class MiniMaxH3DirectorEditor {
                 this.isRunSelectEnabled()
                 && this.getRunnableSegmentCount() >= 2
                 && pxW >= RUN_CHECK_SIZE + 8
-                && (!this.isFl2vMode() || seg.isStartFrame)
             ) {
                 const g = this._runCheckGeometry(seg, width);
                 this._drawSegmentRunCheck(g.boxX, g.boxY, runOn);
@@ -11804,29 +11633,8 @@ class MiniMaxH3DirectorEditor {
         this.refreshLiveTaePreviewButton();
         this.updateLiveSamplePanel();
         this.scheduleTimelineSync();
-        this.pushPreviewState();
         this.updateDomWidgetHeight?.();
         syncDirectorNodeSize(this.node, this);
-    }
-
-    /** 把两个预览开关即时上报后端（POST /minimax/director/set_preview）。
-     *  采样运行中切换时，正在跑的采样下一步即按新开关解码/推送（运行中开→即时生效、
-     *  关→即时停止空耗算力）。fire-and-forget：预览为 best-effort，上报失败静默不打断 UI。
-     *  非运行时上报也无害——下次运行 init 会用与 widget 一致的提交值重置。 */
-    pushPreviewState() {
-        const nodeId = this.node?.id;
-        if (nodeId == null) return;
-        try {
-            api.fetchApi("/minimax/director/set_preview", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    node_id: nodeId,
-                    live_tae_preview: this.isLiveTaePreviewEnabled(),
-                    live_audio_preview: this.isLiveAudioPreviewEnabled(),
-                }),
-            }).catch(() => { /* best-effort，忽略 */ });
-        } catch { /* best-effort，忽略 */ }
     }
 
     refreshLiveTaePreviewButton() {
@@ -11838,105 +11646,6 @@ class MiniMaxH3DirectorEditor {
         btn.title = on ? t("tooltip.liveTaePreviewOn") : t("tooltip.liveTaePreviewOff");
         btn.setAttribute("data-i18n", "toolbar.liveTaePreview");
         btn.removeAttribute("data-i18n-title");
-    }
-
-    isLiveAudioPreviewEnabled() {
-        return this.timeline?.liveAudioPreview === true;
-    }
-
-    /** 音频预览仅对模型生成音频（非静音/原声）有意义；且需在有统一试听槽的编辑器上。
-     *  注意：isImageBatch() 对 r2v/t2v/i2v/mixed 等视频批量任务也返回 true（它们的
-     *  director 模式是 prompt_batch），但这些任务在主时间线上有 duration groups
-     *  （usesBatchTimeline() 为真），与单轨编辑器共用同一套主试听面板，应当支持。
-     *  真正要排除的是纯图片组卡片（isImageBatch() 且 !usesBatchTimeline()）。 */
-    canPreviewAudio() {
-        if (this.isImageBatch?.() && !this.usesBatchTimeline?.()) return false;
-        const audioMode = normalizeAudioMode(this.timeline?.output?.audioMode);
-        return audioMode !== "mute" && audioMode !== "source";
-    }
-
-    toggleLiveAudioPreview() {
-        this.timeline.liveAudioPreview = !this.isLiveAudioPreviewEnabled();
-        this.refreshLiveAudioPreviewButton();
-        this.updateLiveAudioBar();
-        this.scheduleTimelineSync();
-        this.pushPreviewState();
-        this.updateDomWidgetHeight?.();
-        syncDirectorNodeSize(this.node, this);
-    }
-
-    refreshLiveAudioPreviewButton() {
-        const btn = this.root?.querySelector('[data-a="live-audio-preview"]');
-        if (!btn) return;
-        const usable = this.canPreviewAudio();
-        const on = this.isLiveAudioPreviewEnabled() && usable;
-        btn.classList.toggle("active", on);
-        btn.disabled = !usable;
-        btn.textContent = t("toolbar.liveAudioPreview");
-        btn.title = !usable
-            ? t("tooltip.liveAudioPreviewUnavailable")
-            : on
-                ? t("tooltip.liveAudioPreviewOn")
-                : t("tooltip.liveAudioPreviewOff");
-        btn.setAttribute("data-i18n", "toolbar.liveAudioPreview");
-        btn.removeAttribute("data-i18n-title");
-    }
-
-    needsLiveAudioBar() {
-        return this.isLiveAudioPreviewEnabled() && this.canPreviewAudio();
-    }
-
-    updateLiveAudioBar() {
-        const bar = this.liveAudioEl;
-        if (!bar) return;
-        const show = this.needsLiveAudioBar();
-        bar.classList.toggle("hidden", !show);
-        if (!show) {
-            this.clearLiveSampleAudio();
-            return;
-        }
-        if (!this._liveAudioB64) {
-            if (this.liveAudioMeta) this.liveAudioMeta.textContent = t("liveSample.audioIdle");
-            if (this.liveAudioStep) this.liveAudioStep.textContent = "";
-        }
-    }
-
-    clearLiveSampleAudio() {
-        this._liveAudioB64 = "";
-        this._liveAudioStep = null;
-        this._liveAudioTotal = null;
-        if (this.liveAudioTag) {
-            try { this.liveAudioTag.pause(); } catch { /* noop */ }
-            this.liveAudioTag.removeAttribute("src");
-            try { this.liveAudioTag.load(); } catch { /* noop */ }
-        }
-        if (this.liveAudioStep) this.liveAudioStep.textContent = "";
-        if (this.liveAudioMeta && this.needsLiveAudioBar()) {
-            this.liveAudioMeta.textContent = t("liveSample.audioIdle");
-        }
-    }
-
-    /** Manual-listen audio preview: update the <audio> src, never autoplay. */
-    setLiveSampleAudio(detail = {}) {
-        if (!this.needsLiveAudioBar()) return;
-        const b64 = detail.audio_b64 || detail.audioB64 || "";
-        if (!b64) return;
-        this.liveAudioEl?.classList.remove("hidden");
-        this._liveAudioB64 = b64;
-        this._liveAudioStep = detail.step ?? null;
-        this._liveAudioTotal = detail.total_steps ?? detail.totalSteps ?? null;
-        if (this.liveAudioTag) {
-            const src = b64.startsWith("data:") ? b64 : `data:audio/wav;base64,${b64}`;
-            this.liveAudioTag.src = src;
-        }
-        const step = this._liveAudioStep;
-        const total = this._liveAudioTotal;
-        if (this.liveAudioStep) {
-            this.liveAudioStep.textContent = (step && total)
-                ? t("liveSample.audioStep", { step, total })
-                : t("liveSample.audioReady");
-        }
-        if (this.liveAudioMeta) this.liveAudioMeta.textContent = t("liveSample.audioAvailable");
     }
 
     _clearEmbeddedLiveLayoutClasses() {
@@ -13162,10 +12871,6 @@ app.registerExtension({
             editor.setLiveSamplePreview?.(detail);
         });
 
-        api.addEventListener("minimax_director_audio", ({ detail }) => {
-            findDirectorNode(detail?.node_id)?._minimaxEditor?.setLiveSampleAudio?.(detail);
-        });
-
         api.addEventListener("executing", ({ detail }) => {
             if (detail == null) return;
             const node = findDirectorNode(detail);
@@ -13173,7 +12878,6 @@ app.registerExtension({
             if (!editor) return;
             editor.flushTimelineSync?.();
             editor.clearLiveSamplePreview?.();
-            editor.clearLiveSampleAudio?.();
             if (editor.isImageBatch?.()) {
                 for (const seg of editor.timeline.segments || []) {
                     seg.previewB64 = "";

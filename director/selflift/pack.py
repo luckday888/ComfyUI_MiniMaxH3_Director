@@ -175,7 +175,7 @@ def selflift_fingerprint(plan) -> dict[str, Any]:
     pack = getattr(plan, "selflift", None)
     if not isinstance(pack, dict) or not pack.get("enabled"):
         return {}
-    fp = {
+    return {
         "selflift": True,
         "sl_split": pack.get("split_mode") or "",
         "sl_high": int(pack.get("highres_steps") or 0),
@@ -194,15 +194,6 @@ def selflift_fingerprint(plan) -> dict[str, Any]:
         "sl_overlap": int(pack.get("tile_overlap") or 0),
         "sl_hires_model": bool(pack.get("sample_model") is not None),
     }
-    # 掩码融合只在「引导+重绘」下生效；加版本字段让修复前的旧缓存失效，
-    # 「引导」模式行为不变、缓存不重算。
-    from ..segment_continuity import is_continue_mode
-
-    if is_continue_mode(plan):
-        fp["sl_mask_fuse"] = 1
-        # 接缝 taper 锚定：版本字段让修复前的旧一采缓存失效
-        fp["sl_seam_taper"] = 1
-    return fp
 
 
 def selflift_report_line(plan) -> str | None:

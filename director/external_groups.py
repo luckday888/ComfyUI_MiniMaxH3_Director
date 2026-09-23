@@ -92,15 +92,11 @@ def witness_prompt_digest(prompt: str) -> str:
 def execute_group_record(index: int, group: dict[str, Any] | None) -> dict[str, Any]:
     """Identity written into first-pass cache when the frontend witness is missing."""
     g = group if isinstance(group, dict) else {}
-    from .plan import resolve_seg_id
-
     try:
         dur = round(float(g.get("duration_sec") or 0), 6)
     except (TypeError, ValueError):
         dur = None
     return {
-        # 段稳定身份：与 SegmentPlan.seg_id 同源，缓存面板据此定位 segid_* 文件
-        "id": resolve_seg_id(g, index),
         "slot": f"group_{int(index)}",
         "node": "",
         "prompt": witness_prompt_digest(g.get("prompt") or ""),
@@ -152,10 +148,6 @@ def normalize_external_group_record(raw: Any) -> dict[str, Any] | None:
         "prompt": str(raw.get("prompt") or "").strip()[:_WITNESS_STR_MAX],
         "sub": str(raw.get("sub") or "").strip()[:_WITNESS_STR_MAX],
     }
-    # 前端 witness 当前不产生 id；缺失时由调用方回退 p<index>（与 resolve_seg_id 同源）
-    raw_id = str(raw.get("id") or "").strip()
-    if raw_id:
-        record["id"] = raw_id[:_WITNESS_STR_MAX]
     dur = raw.get("dur")
     if dur is not None:
         try:
@@ -612,8 +604,6 @@ def build_plan_from_external_groups(
         merge_indexed_refs,
         drop_unusable_audio_prompt_tags,
         reinforce_r2v_prompt,
-        resolve_ref_image_size,
-        resolve_seg_id,
         usable_ref_audio_indices,
     )
 
@@ -759,7 +749,6 @@ def build_plan_from_external_groups(
                     negative_prompt=DEFAULT_FL2V_NEGATIVE if seg_task_key == "fl2v" else "",
                     source_clip=source_clip,
                     ui_index=int(src_index),
-                    seg_id=resolve_seg_id(g, plan_idx),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
@@ -830,7 +819,6 @@ def build_plan_from_external_groups(
                     ref_video_audios=ref_video_audios,
                     source_clip=None,
                     ui_index=int(src_index),
-                    seg_id=resolve_seg_id(g, plan_idx),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
@@ -858,22 +846,18 @@ def build_plan_from_external_groups(
     raw["editMode"] = "segment"
 
     from .segment_continuity import (
-        resolve_audio_continuity_enabled,
+        resolve_continuity_keep_tail,
         resolve_continuity_mode,
         resolve_continuity_redraw,
         resolve_continuity_settings,
-        resolve_exposure_anchor_enabled,
-        resolve_exposure_anchor_strength,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
-    audio_continuity_enabled = resolve_audio_continuity_enabled(timeline)
     continuity_mode = resolve_continuity_mode(timeline)
     continuity_redraw = resolve_continuity_redraw(timeline)
-    exposure_anchor_enabled = resolve_exposure_anchor_enabled(timeline)
-    exposure_anchor_strength = resolve_exposure_anchor_strength(timeline)
+    continuity_keep_tail = resolve_continuity_keep_tail(timeline)
 
     plan = DirectorPlan(
         frame_rate=fps,
@@ -896,11 +880,9 @@ def build_plan_from_external_groups(
         run_indices=run_indices,
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
-        audio_continuity_enabled=audio_continuity_enabled,
         continuity_mode=continuity_mode,
         continuity_redraw=continuity_redraw,
-        exposure_anchor_enabled=exposure_anchor_enabled,
-        exposure_anchor_strength=exposure_anchor_strength,
+        continuity_keep_tail=continuity_keep_tail,
         global_ref_audios=list(common_audios_raw) if family == "r2v" else [],
     )
     # Prefer the frontend wiring witness (same blob the cache panel sends).

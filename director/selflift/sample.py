@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-import math
 from typing import Any, Callable
 
 import torch
 
 from ..core_sampling import ShiftedModelCache, sample_single_stage
-from ..h3_latent_continue import PREFIX_STEPS_KEY, SEAM_TAPER_TOKENS
+from ..h3_latent_continue import PREFIX_STEPS_KEY
 from ..h3_motion_context import _repack_av_streams, av_pixel_size
 from .carry import (
     copy_low_tail,
@@ -531,28 +530,6 @@ def sample_selflift_stage(
                 if t_pin > 0:
                     noise = noise.clone()
                     noise[:, :, :t_pin] = unit[:, :, :t_pin]
-                # 接缝 taper：硬锁 pin 之后第一个自由 token 起，连续 SEAM_TAPER_TOKENS
-                # 个 token，把起点从「模糊 lift state」按 1→0 渐变锚到「高清 pin 末帧
-                # 的 i2v 加噪态」。消除 f2 起 lift 模糊态的硬断点，清晰度渐变进新段。
-                t_total = int(noise.shape[2])
-                taper = min(
-                    int(SEAM_TAPER_TOKENS),
-                    t_total - t_pin,
-                    int(unit.shape[2]) - t_pin,
-                )
-                if taper > 0 and t_pin > 0:
-                    noise = noise.clone()
-                    pin_last = clean_t[:, :, t_pin - 1 : t_pin]
-                    for off in range(taper):
-                        w = 0.5 * (1.0 + math.cos(math.pi * off / float(taper)))
-                        tok = t_pin + off
-                        anchor = (
-                            unit[:, :, tok : tok + 1]
-                            + (1.0 - sigma_resume) * pin_last / denom
-                        )
-                        noise[:, :, tok : tok + 1] = (
-                            (1.0 - w) * noise[:, :, tok : tok + 1] + w * anchor
-                        )
             noise_parts.append(noise)
         high_noise = _pack(noise_parts, high_nested, latent.get("samples"))
         high_zero_noise = False
