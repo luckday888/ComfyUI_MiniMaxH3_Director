@@ -92,11 +92,15 @@ def witness_prompt_digest(prompt: str) -> str:
 def execute_group_record(index: int, group: dict[str, Any] | None) -> dict[str, Any]:
     """Identity written into first-pass cache when the frontend witness is missing."""
     g = group if isinstance(group, dict) else {}
+    from .plan import resolve_seg_id
+
     try:
         dur = round(float(g.get("duration_sec") or 0), 6)
     except (TypeError, ValueError):
         dur = None
     return {
+        # 段稳定身份：与 SegmentPlan.seg_id 同源，缓存面板据此定位 segid_* 文件
+        "id": resolve_seg_id(g, index),
         "slot": f"group_{int(index)}",
         "node": "",
         "prompt": witness_prompt_digest(g.get("prompt") or ""),
@@ -159,6 +163,10 @@ def normalize_external_group_record(raw: Any) -> dict[str, Any] | None:
     facets = _normalize_witness_facets(raw.get("facets"))
     if facets:
         record["facets"] = facets
+    # 前端 witness 当前不产生 id；缺失时由调用方回退 p<index>（与 resolve_seg_id 同源）
+    raw_id = str(raw.get("id") or "").strip()
+    if raw_id:
+        record["id"] = raw_id[:_WITNESS_STR_MAX]
     return record
 
 
@@ -604,6 +612,7 @@ def build_plan_from_external_groups(
         merge_indexed_refs,
         drop_unusable_audio_prompt_tags,
         reinforce_r2v_prompt,
+        resolve_seg_id,
         usable_ref_audio_indices,
     )
 
@@ -749,6 +758,7 @@ def build_plan_from_external_groups(
                     negative_prompt=DEFAULT_FL2V_NEGATIVE if seg_task_key == "fl2v" else "",
                     source_clip=source_clip,
                     ui_index=int(src_index),
+                    seg_id=resolve_seg_id(g, plan_idx),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
@@ -819,6 +829,7 @@ def build_plan_from_external_groups(
                     ref_video_audios=ref_video_audios,
                     source_clip=None,
                     ui_index=int(src_index),
+                    seg_id=resolve_seg_id(g, plan_idx),
                     continuity_from_prev=resolve_segment_continuity_from_prev(
                         row, segment_index=plan_idx
                     ),
