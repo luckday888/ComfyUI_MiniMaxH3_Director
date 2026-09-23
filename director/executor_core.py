@@ -1373,7 +1373,9 @@ def execute_director_plan_core(
                 shift_audio=shift_audio,
                 sigmas=first_pass_sigmas,
                 on_phase=_report_sample_phase,
-                on_step_preview=_report_step_preview if live_tae_preview else None,
+                on_step_preview=(
+                    _report_step_preview if (live_tae_preview or live_audio_preview) else None
+                ),
                 preview_every=1,
                 after_shift=after_shift,
                 shift_cache=shift_cache,
