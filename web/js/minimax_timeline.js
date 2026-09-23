@@ -11784,8 +11784,29 @@ class MiniMaxH3DirectorEditor {
         this.refreshLiveTaePreviewButton();
         this.updateLiveSamplePanel();
         this.scheduleTimelineSync();
+        this.pushPreviewState();
         this.updateDomWidgetHeight?.();
         syncDirectorNodeSize(this.node, this);
+    }
+
+    /** 把两个预览开关即时上报后端（POST /minimax/director/set_preview）。
+     *  采样运行中切换时，正在跑的采样下一步即按新开关解码/推送（运行中开→即时
+     *  生效、关→即时停止空耗算力）。fire-and-forget：预览为 best-effort，上报
+     *  失败静默不打断 UI。非运行时上报也无害——下次运行 init 会用提交值重置 */
+    pushPreviewState() {
+        const nodeId = this.node?.id;
+        if (nodeId == null) return;
+        try {
+            api.fetchApi("/minimax/director/set_preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    node_id: nodeId,
+                    live_tae_preview: this.isLiveTaePreviewEnabled(),
+                    live_audio_preview: this.isLiveAudioPreviewEnabled(),
+                }),
+            }).catch(() => { /* best-effort，忽略 */ });
+        } catch { /* best-effort，忽略 */ }
     }
 
     refreshLiveTaePreviewButton() {
@@ -11819,6 +11840,7 @@ class MiniMaxH3DirectorEditor {
         this.refreshLiveAudioPreviewButton();
         this.updateLiveAudioBar();
         this.scheduleTimelineSync();
+        this.pushPreviewState();
         this.updateDomWidgetHeight?.();
         syncDirectorNodeSize(this.node, this);
     }
