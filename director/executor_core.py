@@ -2047,6 +2047,13 @@ def execute_director_plan_core(
         fallback = torch.full((1, 1, 1, 3), 0.5)
         combined = group_chunks[-1] if group_chunks else fallback
         pre_combined = group_pre[-1] if group_pre else combined
+        if export_pre_face_refine:
+            pre_face_combined = (
+                segment_pre_face[-1] if segment_pre_face else combined
+            )
+        else:
+            pre_face_combined = None
+            segment_pre_face = []
         reports.append(
             "Export mode: selection — merged consecutive selected segments into "
             f"{len(group_chunks)} clip(s): {', '.join(group_desc)}."
