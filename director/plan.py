@@ -221,7 +221,6 @@ def merge_indexed_refs(common: list, segment: list) -> list:
     return sorted(by_idx.values(), key=lambda r: int(getattr(r, "index", 0)))
 
 
-@dataclass
 def resolve_seg_id(raw, index: int) -> str:
     """读取段的稳定身份（timeline JSON 里持久存在的 ``id``）。
 
@@ -236,6 +235,7 @@ def resolve_seg_id(raw, index: int) -> str:
     return sid or f"p{int(index):04d}"
 
 
+@dataclass
 class SegmentPlan:
     index: int
     start_frame: int
