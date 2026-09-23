@@ -200,6 +200,8 @@ def selflift_fingerprint(plan) -> dict[str, Any]:
 
     if is_continue_mode(plan):
         fp["sl_mask_fuse"] = 1
+        # 接缝 taper 锚定：版本字段让修复前的旧一采缓存失效
+        fp["sl_seam_taper"] = 1
     return fp
 
 
