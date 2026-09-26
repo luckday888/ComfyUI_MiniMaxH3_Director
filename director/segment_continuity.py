@@ -205,9 +205,13 @@ def is_continue_mode(plan) -> bool:
 
 
 def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[bool, int]:
-    """Read segment continuity flags from timeline JSON (output only; default off)."""
-    if segment_count < 2:
-        return False, 0
+    """Read segment continuity flags from timeline JSON (output only; default off).
+
+    单段时也忠实返回 UI 开关：生成行为由 is_continuity_active 的
+    segment_count>=2 / seg.index>0 守卫兜底，但 continuity_enabled=True
+    会让首段 cache 落盘，供之后追加的第二段做段间衔接。
+    """
+    _ = segment_count  # 保留参数兼容调用方；是否生效由 is_continuity_active 判定
     output = timeline.get("output") or {}
     enabled = _truthy_continuity_flag(
         output.get("continuityEnabled", output.get("continuity_enabled"))
