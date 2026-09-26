@@ -1,5 +1,11 @@
 """Disk cache for MiniMax H3 Director segment decode outputs (partial re-run + merge).
 
+Frame payloads are stored losslessly as FFV1 (``seg_XXXX.frames.mkv`` /
+``seg_XXXX.pre.frames.mkv``) via :mod:`..lib.frames_ffv1`. Payloads written by
+older versions as raw uint8 ``torch.save`` (``seg_XXXX.pt``) are still *read*,
+and are deleted as soon as that slot is written again. Nothing else about the
+layout changed (``.av.pt`` / ``.audio.pt`` / ``.handoff.json`` / ``.meta.json``).
+
 Cache is best-effort: write failures (cloud RO mounts, same-name overwrite
 blocks, full disks) must never abort the main generation run.
 """
@@ -18,6 +24,7 @@ import torch
 
 import folder_paths
 
+from ..lib.frames_ffv1 import FRAMES_SUFFIX, decode_frames_ffv1, encode_frames_ffv1
 from .h3_latent_continue import CONTINUE_PIPELINE_ID, clamp_seam_min_mask
 from .h3_motion_context import CONTINUITY_PIPELINE_ID, trim_context_prefix, trim_export_tail
 from .plan import DirectorPlan, SegmentPlan, resolve_ref_image_size
@@ -47,6 +54,9 @@ SFX_PRE_FRAMES = ".pre.pt"
 SFX_PRE_META = ".pre.meta.json"
 SFX_PRE_AV = ".pre.av.pt"
 SFX_PRE_HANDOFF = ".pre.handoff.json"
+# FFV1 无损压缩帧载荷后缀（与 raw .pt 互为孪生，写入一种即删除另一种）
+SFX_FINAL_FRAMES_FFV1 = FRAMES_SUFFIX
+SFX_PRE_FRAMES_FFV1 = f".pre{FRAMES_SUFFIX}"
 
 
 def stable_seg_id(seg: SegmentPlan) -> str:
@@ -503,6 +513,7 @@ def _retire_legacy_copies(
 
 _FINAL_ALL_SUFFIXES = (
     SFX_FINAL_FRAMES,
+    SFX_FINAL_FRAMES_FFV1,
     SFX_FINAL_META,
     SFX_FINAL_AV,
     SFX_FINAL_HANDOFF,
@@ -510,10 +521,106 @@ _FINAL_ALL_SUFFIXES = (
 )
 _PRE_ALL_SUFFIXES = (
     SFX_PRE_FRAMES,
+    SFX_PRE_FRAMES_FFV1,
     SFX_PRE_META,
     SFX_PRE_AV,
     SFX_PRE_HANDOFF,
 )
+
+
+# ── 像素帧存储编码（raw .pt / 无损 FFV1 .frames.mkv）─────────────────────────
+# 上游 FFV1 特性移植为稳定段 id 的 stem 寻址：FFV1 文件名是 ``<stem>.frames.mkv``
+# （一采为 ``<stem>.pre.frames.mkv``），与 raw 的 ``<stem>.pt`` / ``<stem>.pre.pt``
+# 互为孪生；写入一种编码即删除另一种，读取时 FFV1 优先、raw 回退。
+
+
+def _frames_stem_base(stem: str, *, first_pass: bool) -> str:
+    return f"{stem}.pre" if first_pass else stem
+
+
+def _frames_path(root: Path, stem: str, *, first_pass: bool) -> Path:
+    """FFV1 帧载荷路径：``<stem>.frames.mkv`` / ``<stem>.pre.frames.mkv``。"""
+    return root / f"{_frames_stem_base(stem, first_pass=first_pass)}{FRAMES_SUFFIX}"
+
+
+def _legacy_frames_path(root: Path, stem: str, *, first_pass: bool) -> Path:
+    """raw ``torch.save`` 载荷路径（``.pt``）。"""
+    return root / f"{_frames_stem_base(stem, first_pass=first_pass)}.pt"
+
+
+def _frames_exist(root: Path, stem: str, *, first_pass: bool) -> bool:
+    """FFV1 或 raw 任一载荷在盘即为 True。"""
+    return _frames_path(root, stem, first_pass=first_pass).is_file() or _legacy_frames_path(
+        root, stem, first_pass=first_pass
+    ).is_file()
+
+
+def _load_frames(root: Path, stem: str, *, first_pass: bool) -> torch.Tensor | None:
+    """读取该段帧为 float32 [0,1]——FFV1 优先，raw ``.pt`` 回退。
+
+    必须无损：段间引导的 handoff 会把这些像素钉为下一段前缀，任何重编码
+    漂移都会腐蚀接缝。解码失败按缓存未命中降级，绝不中断运行。
+    """
+    new_path = _frames_path(root, stem, first_pass=first_pass)
+    if new_path.is_file():
+        try:
+            return _frames_from_disk(decode_frames_ffv1(new_path))
+        except Exception as exc:
+            log.warning("Failed to decode frame cache %s: %s", new_path.name, exc)
+            return None
+    legacy = _legacy_frames_path(root, stem, first_pass=first_pass)
+    if legacy.is_file():
+        try:
+            return _frames_from_disk(
+                torch.load(legacy, map_location="cpu", weights_only=True)
+            )
+        except Exception as exc:
+            log.warning("Failed to load legacy frame cache %s: %s", legacy.name, exc)
+            return None
+    return None
+
+
+def _drop_legacy_frames(root: Path, stem: str, *, first_pass: bool) -> None:
+    """FFV1 发布后删除 raw ``.pt`` 孪生。"""
+    legacy = _legacy_frames_path(root, stem, first_pass=first_pass)
+    if legacy.is_file():
+        _safe_unlink(legacy)
+
+
+def _drop_ffv1_frames(root: Path, stem: str, *, first_pass: bool) -> None:
+    """raw ``.pt`` 发布后删除 FFV1 孪生。"""
+    path = _frames_path(root, stem, first_pass=first_pass)
+    if path.is_file():
+        _safe_unlink(path)
+
+
+def _frames_codec(plan) -> str:
+    codec = str(getattr(plan, "cache_frames_codec", "raw") or "raw").strip().lower()
+    return "ffv1" if codec == "ffv1" else "raw"
+
+
+def _store_segment_frames(
+    root: Path,
+    stem: str,
+    payload: torch.Tensor,
+    *,
+    first_pass: bool,
+    plan,
+) -> None:
+    """按 plan 配置的编码写入像素帧，并删除另一种格式的孪生。"""
+    if _frames_codec(plan) == "ffv1":
+        fps = float(getattr(plan, "frame_rate", 24) or 24)
+        _write_via_temp(
+            _frames_path(root, stem, first_pass=first_pass),
+            lambda p: encode_frames_ffv1(p, payload, fps=fps),
+        )
+        _drop_legacy_frames(root, stem, first_pass=first_pass)
+        return
+    _write_via_temp(
+        _legacy_frames_path(root, stem, first_pass=first_pass),
+        lambda p: torch.save(payload, p),
+    )
+    _drop_ffv1_frames(root, stem, first_pass=first_pass)
 
 
 def save_segment_cache(
@@ -543,14 +650,13 @@ def save_segment_cache(
     fp = segment_cache_fingerprint(seg, plan)
     idx = seg.index
     stem = _write_stem(seg)
-    pt_path = root / f"{stem}{SFX_FINAL_FRAMES}"
     meta_path = root / f"{stem}{SFX_FINAL_META}"
     latent_path = root / f"{stem}{SFX_FINAL_AV}"
     handoff_path = root / f"{stem}{SFX_FINAL_HANDOFF}"
     audio_path = root / f"{stem}{SFX_FINAL_AUDIO}"
     try:
         payload = _frames_to_disk(tensor)
-        _write_via_temp(pt_path, lambda p: torch.save(payload, p))
+        _store_segment_frames(root, stem, payload, first_pass=False, plan=plan)
         text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
         _write_via_temp(
             meta_path,
@@ -858,7 +964,6 @@ def _fingerprint_matches(
         return False
     stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
     meta_path = root / f"{stem}{SFX_FINAL_META}"
-    tensor_path = root / f"{stem}{SFX_FINAL_FRAMES}"
     if not meta_path.is_file():
         return False
     try:
@@ -870,7 +975,7 @@ def _fingerprint_matches(
             return True
         if _reject_source_stale(stored, expected, seg_index=seg.index, quiet=True):
             return False
-        return bool(allow_stale and tensor_path.is_file())
+        return bool(allow_stale and _frames_exist(root, stem, first_pass=False))
     except Exception:
         return False
 
@@ -898,8 +1003,7 @@ def load_segment_cache(
     idx = seg.index
     stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
     meta_path = root / f"{stem}{SFX_FINAL_META}"
-    tensor_path = root / f"{stem}{SFX_FINAL_FRAMES}"
-    if not tensor_path.is_file():
+    if not _frames_exist(root, stem, first_pass=False):
         return None
     try:
         expected = segment_cache_fingerprint(seg, plan)
@@ -934,9 +1038,7 @@ def load_segment_cache(
                 "Segment %d: using cache without meta for export fill.",
                 idx + 1,
             )
-        return _frames_from_disk(
-            torch.load(tensor_path, map_location="cpu", weights_only=True)
-        )
+        return _load_frames(root, stem, first_pass=False)
     except Exception as exc:
         log.warning("Failed to load segment %d cache: %s", idx + 1, exc)
         return None
@@ -998,7 +1100,6 @@ def save_first_pass_cache(
     stem = _write_stem(seg)
     meta_path = root / f"{stem}{SFX_PRE_META}"
     latent_path = root / f"{stem}{SFX_PRE_AV}"
-    frames_path = root / f"{stem}{SFX_PRE_FRAMES}"
     handoff_path = root / f"{stem}{SFX_PRE_HANDOFF}"
     low_path = root / f"{stem}.pre.low.pt"
     try:
@@ -1016,7 +1117,7 @@ def save_first_pass_cache(
             )
         if isinstance(frames, torch.Tensor) and frames.numel() > 0:
             payload = _frames_to_disk(frames)
-            _write_via_temp(frames_path, lambda p: torch.save(payload, p))
+            _store_segment_frames(root, stem, payload, first_pass=True, plan=plan)
         if isinstance(low_carry, dict) and "samples" in low_carry:
             cpu_low = _av_latent_to_cpu(low_carry)
             _write_via_temp(low_path, lambda p: torch.save(cpu_low, p))
@@ -1073,7 +1174,7 @@ def load_first_pass_frames_stale(
     *,
     match_len: int | None = None,
 ) -> torch.Tensor | None:
-    """Load ``.pre.pt`` frames for unselected-segment pre-refine fill.
+    """Load first-pass frames (``.pre.frames.mkv``) for unselected pre-refine fill.
 
     Stale-tolerant counterpart of :func:`load_first_pass_cache`: fingerprint
     drift (different seed, sampling-knob churn) does NOT invalidate the fill,
@@ -1081,7 +1182,7 @@ def load_first_pass_frames_stale(
     mixing a fresh first pass with cached refined renders. A different source
     video still rejects (same rule as the final-cache fill). Never raises.
 
-    Disk ``.pre.pt`` is written before export trim; this reapplies
+    The on-disk first-pass payload is written before export trim; this reapplies
     ``.pre.handoff.json`` (context prefix + export length) and optionally
     matches the final-cache frame count after later phase-align tail trims.
     """
@@ -1092,10 +1193,9 @@ def load_first_pass_frames_stale(
         return None
     idx = seg.index
     stem = _resolve_stem(root, seg, SFX_PRE_META, SFX_PRE_AV)
-    frames_path = root / f"{stem}{SFX_PRE_FRAMES}"
     meta_path = root / f"{stem}{SFX_PRE_META}"
     handoff_path = root / f"{stem}{SFX_PRE_HANDOFF}"
-    if not frames_path.is_file():
+    if not _frames_exist(root, stem, first_pass=True):
         return None
     try:
         if meta_path.is_file():
@@ -1105,10 +1205,7 @@ def load_first_pass_frames_stale(
                 return None
             if _reject_source_stale(stored, expected, seg_index=idx, quiet=True):
                 return None
-        loaded = torch.load(frames_path, map_location="cpu", weights_only=True)
-        if not isinstance(loaded, torch.Tensor) or loaded.numel() <= 0:
-            return None
-        frames = _frames_from_disk(loaded)
+        frames = _load_frames(root, stem, first_pass=True)
         if frames is None:
             return None
         handoff = None
@@ -1142,7 +1239,6 @@ def load_first_pass_cache(
     stem = _resolve_stem(root, seg, SFX_PRE_META, SFX_PRE_AV)
     meta_path = root / f"{stem}{SFX_PRE_META}"
     latent_path = root / f"{stem}{SFX_PRE_AV}"
-    frames_path = root / f"{stem}{SFX_PRE_FRAMES}"
     handoff_path = root / f"{stem}{SFX_PRE_HANDOFF}"
     low_path = root / f"{stem}.pre.low.pt"
     if not meta_path.is_file() or not latent_path.is_file():
@@ -1175,13 +1271,8 @@ def load_first_pass_cache(
         if not isinstance(payload, dict) or "samples" not in payload:
             return None
         frames = None
-        if frames_path.is_file():
-            try:
-                loaded = torch.load(frames_path, map_location="cpu", weights_only=True)
-                if isinstance(loaded, torch.Tensor) and loaded.numel() > 0:
-                    frames = _frames_from_disk(loaded)
-            except Exception as exc:
-                log.debug("Segment %d first-pass frames skipped: %s", idx + 1, exc)
+        if _frames_exist(root, stem, first_pass=True):
+            frames = _load_frames(root, stem, first_pass=True)
         handoff: dict[str, Any] = {}
         if handoff_path.is_file():
             try:
@@ -1209,11 +1300,13 @@ _CACHE_SUFFIXES_FOR_PARSE = (
     SFX_PRE_META,
     SFX_PRE_AV,
     SFX_PRE_HANDOFF,
+    SFX_PRE_FRAMES_FFV1,
     SFX_PRE_FRAMES,
     SFX_FINAL_META,
     SFX_FINAL_AV,
     SFX_FINAL_HANDOFF,
     SFX_FINAL_AUDIO,
+    SFX_FINAL_FRAMES_FFV1,
     SFX_FINAL_FRAMES,
 )
 _STABLE_PREFIX_RE = re.compile(r"^segid_(.+)$")
@@ -1364,7 +1457,8 @@ def _comparable_first_pass_fingerprint(plan: DirectorPlan) -> dict[str, Any]:
 
 
 _PRE_META_NAME_RE = re.compile(r"^seg_(\d+)\.pre\.meta\.json$")
-_FINAL_FRAMES_NAME_RE = re.compile(r"^seg_\d+\.pt$")
+# Final-render frame payload: FFV1 (current) or the legacy raw uint8 ``.pt``.
+_FINAL_FRAMES_NAME_RE = re.compile(r"^seg_\d+(?:\.frames\.mkv|\.pt)$")
 
 # Buckets of a group record's digest. Only used to *name* the change: the
 # per-group record is compared as a whole (that is what makes one group's edit
@@ -1500,14 +1594,16 @@ def _external_segment_diff(stored_record: Any, expected_record: Any) -> list[str
 
 
 def _count_final_segment_files(root: Path) -> int:
-    """最终成片文件数（旧版 ``seg_XXXX.pt`` + 稳定 id ``segid_*.pt``）；never raises."""
+    """最终成片帧载荷数（raw ``.pt`` / FFV1 ``.frames.mkv``，含旧位置与 segid_ 命名）；never raises."""
     if not root.is_dir():
         return 0
     try:
         total = 0
-        for path in root.glob("*.pt"):
+        for path in root.iterdir():
             name = path.name
             if ".pre." in name or ".av." in name or ".audio." in name:
+                continue
+            if not (name.endswith(".pt") or name.endswith(FRAMES_SUFFIX)):
                 continue
             if _FINAL_FRAMES_NAME_RE.match(name) or name.startswith("segid_"):
                 total += 1
@@ -1824,9 +1920,8 @@ def inspect_first_pass_cache(
         else:
             diff = fp_diff
         final_stem = _resolve_stem(root, seg, SFX_FINAL_META, SFX_FINAL_FRAMES)
-        final_path = root / f"{final_stem}{SFX_FINAL_FRAMES}"
         final_meta_path = root / f"{final_stem}{SFX_FINAL_META}"
-        final_exists = final_path.is_file()
+        final_exists = _frames_exist(root, final_stem, first_pass=False)
         final_match = False
         final_diff: list[str] = []
         if final_exists and final_meta_path.is_file():

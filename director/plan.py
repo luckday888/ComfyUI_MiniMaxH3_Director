@@ -294,6 +294,8 @@ class DirectorPlan:
     source_total_frames: int = 0
     export_max_frames: int = 0
     export_mode: str = "all"  # "all" | "segments" | "selection"
+    # 段缓存像素帧存储编码："raw" = uint8 .pt；"ffv1" = 无损压缩 mkv
+    cache_frames_codec: str = "raw"
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0

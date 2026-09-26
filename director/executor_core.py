@@ -104,7 +104,7 @@ from .segment_continuity import (
     match_export_opening_grade,
     resolve_prev_segment_output,
 )
-from .vram_cleanup import cleanup_segment_vram
+from .vram_cleanup import cleanup_segment_vram, restore_persistent_model_registration
 from .preview_state import get_preview, init_preview_state
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
@@ -555,6 +555,22 @@ def execute_director_plan_core(
     if live_audio_preview:
         reports.append("Live audio preview: ON — 采样自首步起解码当前步音频（早期偏噪），供节点内手动试听、及早止损。")
     shift_cache = ShiftedModelCache()
+    # held_loaded_model：滚动强引用“最近一次真正参与采样的 patcher”（引导+重绘
+    # 时为一次性 remask clone）。保活到下一次采样 / 运行收尾，防止 clone 被 GC
+    # 成 is_dead 死条目（"memory leak with model MiniMaxH3" 假告警的来源）。
+    held_loaded_model = None
+
+    def _on_loaded(loaded_model) -> None:
+        nonlocal held_loaded_model
+        held_loaded_model = loaded_model
+
+    def _alive_models() -> list:
+        """当前仍被强引用的 patcher：持久 SigmaShift clone（若已建）+ 最近采样加载者。"""
+        items = [held_loaded_model]
+        cached = shift_cache.peek(model, shift_video, shift_audio)
+        if cached is not None:
+            items.append(cached)
+        return items
     if clear_vram_between_segments:
         reports.append("VRAM: 段间清理显存已开启（最后一段不清理）。")
     if clear_vram_before_refine:
@@ -1202,7 +1218,7 @@ def execute_director_plan_core(
 
         # Single / last segment: skip — official H3 also keeps models loaded.
         if clear_vram_between_segments and seg_total > 1:
-            cleanup_segment_vram(enabled=True, unload_models=True)
+            cleanup_segment_vram(enabled=True, unload_models=True, models=_alive_models())
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
@@ -1322,6 +1338,7 @@ def execute_director_plan_core(
                 preview_every=1,
                 after_shift=after_shift,
                 shift_cache=shift_cache,
+                on_loaded=_on_loaded,
                 prev_low_carry=prev_low_carry if use_motion_context else None,
                 pin_frames=trim_frames,
                 prev_end_frame=prev_end_frame,
@@ -1357,6 +1374,7 @@ def execute_director_plan_core(
                 preview_every=1,
                 after_shift=after_shift,
                 shift_cache=shift_cache,
+                on_loaded=_on_loaded,
             )
 
         first_pass_samples = samples
@@ -1401,7 +1419,7 @@ def execute_director_plan_core(
         # Same-segment peak: first-pass UNET/VAE still resident when refine
         # starts. Optional unload (default off) frees that before upscale/sample.
         if clear_vram_before_refine and run_refine:
-            cleanup_segment_vram(enabled=True, unload_models=True)
+            cleanup_segment_vram(enabled=True, unload_models=True, models=_alive_models())
             reports.append(
                 f"Segment {ui_idx + 1}/{timeline_seg_total}: "
                 "VRAM cleanup between first pass and refine"
@@ -1609,7 +1627,7 @@ def execute_director_plan_core(
         pre_face_chunk = chunk
         if run_face_refine and not hold_after_first:
             if clear_vram_before_face_refine:
-                cleanup_segment_vram(enabled=True, unload_models=True)
+                cleanup_segment_vram(enabled=True, unload_models=True, models=_alive_models())
                 reports.append(
                     f"Segment {ui_idx + 1}/{timeline_seg_total}: "
                     "VRAM cleanup before face refine"
@@ -1755,7 +1773,7 @@ def execute_director_plan_core(
             )
 
         if clear_vram_between_segments and progress_index < seg_total - 1:
-            cleanup_segment_vram(enabled=True)
+            cleanup_segment_vram(enabled=True, models=_alive_models())
 
         reports.append(
             f"Segment {ui_idx + 1}/{timeline_seg_total}: {task_hint} "
@@ -1805,7 +1823,7 @@ def execute_director_plan_core(
                     )
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
-                cleanup_segment_vram(enabled=True)
+                cleanup_segment_vram(enabled=True, models=_alive_models())
             try:
                 chunk, audio_dict, pre_chunk, pre_face_chunk = _run_one_segment(
                     seg, progress_index=progress_pos[seg.index]
@@ -2088,9 +2106,20 @@ def execute_director_plan_core(
         else:
             pre_face_combined = None
             segment_pre_face = []
-    shift_cache.clear()
+    # 注意：不得在此 shift_cache.clear()——缓存为进程级，清空会让 SigmaShift
+    # clone 失去最后强引用被 GC，ComfyUI 登记条目变 is_dead（memory leak 假告警）。
+    # 运行收尾：若末段最后加载的是一次性 remask clone，把“当前已加载模型”登记
+    # 交还给跨运行存活的持久 SigmaShift clone（滚动槽随栈帧销毁前，经官方
+    # is_clone 清扫正常摘除 remask 登记），current_loaded_models 零 is_dead 残留。
+    persistent_shifted = None
+    if held_loaded_model is not None:
+        try:
+            persistent_shifted = shift_cache.get(model, shift_video, shift_audio)
+        except Exception:
+            persistent_shifted = None
+    restore_persistent_model_registration(persistent_shifted, held_loaded_model)
     if clear_vram_between_segments:
-        cleanup_segment_vram(enabled=True, unload_models=False)
+        cleanup_segment_vram(enabled=True, unload_models=False, models=_alive_models())
     return (
         combined,
         segment_outputs,

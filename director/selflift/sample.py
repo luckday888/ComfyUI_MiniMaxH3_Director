@@ -203,6 +203,7 @@ def sample_selflift_stage(
     preview_every: int = 1,
     after_shift=None,
     shift_cache: ShiftedModelCache | None = None,
+    on_loaded=None,
     prev_low_carry: dict | None = None,
     pin_frames: int = 0,
     prev_end_frame: int | None = None,
@@ -246,6 +247,7 @@ def sample_selflift_stage(
             on_step_preview=on_step_preview,
             preview_every=preview_every,
             after_shift=after_shift,
+            on_loaded=on_loaded,
             shift_cache=shift_cache,
         )
         return out, None
@@ -359,6 +361,7 @@ def sample_selflift_stage(
         on_step_state=_on_state,
         preview_every=-1,
         after_shift=after_shift,
+        on_loaded=on_loaded,
         shift_cache=shift_cache,
         enable_tiling=False,
     )
@@ -573,6 +576,7 @@ def sample_selflift_stage(
             on_step_state=_high_state,
             preview_every=-1 if on_step_preview is None else preview_every,
             after_shift=after_shift,
+            on_loaded=on_loaded,
             shift_cache=shift_cache,
             enable_tiling=bool(pack.get("enable_tiling")),
             tile_count=int(pack.get("tile_count") or 2),
