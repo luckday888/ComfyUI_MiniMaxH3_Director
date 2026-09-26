@@ -64,6 +64,7 @@ import {
     renderImageBatchGroups,
     setImageBatchPreview,
     setR2vToolbar,
+    stopAllPlayers,
     setToolbarDisabledForBatch,
     bindDomWidgetContentComputeSize,
     contentDomWidgetMinHeight,
@@ -3940,6 +3941,7 @@ class MiniMaxH3DirectorEditor {
         this._unsubLocale = null;
         this._closeBdModal();
         teardownPromptImageMentions(this.root);
+        stopAllPlayers(this.root);
         this._clearPreviewVideos(true);
         this._previewVideos?.clear();
         try {
@@ -3978,6 +3980,7 @@ class MiniMaxH3DirectorEditor {
         try {
             if (this.batchList) {
                 teardownPromptImageMentions(this.batchList);
+                stopAllPlayers(this.batchList);
                 this.batchList.innerHTML = "";
             }
             const taskType = widgets.task_type || widgets.taskType || data.global?.taskType || "";
