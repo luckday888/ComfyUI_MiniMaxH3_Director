@@ -84,7 +84,6 @@ from .segment_cache import (
     load_segment_cache,
     load_segment_handoff_meta,
     prune_segment_cache,
-    record_run_seed,
     save_first_pass_cache,
     save_segment_cache,
 )
@@ -467,8 +466,6 @@ def execute_director_plan_core(
 ]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
     plan.sample_seed = int(seed)
-    # 运行开始即记录 seed（无论后续成功或失败），永久保留在 seeds.log
-    record_run_seed(node_id, int(seed), detail={"segments": len(plan.segments)})
     plan.sample_cfg = float(cfg)
     plan.sample_steps = int(steps)
     plan.sample_sampler = str(sampler or "")
