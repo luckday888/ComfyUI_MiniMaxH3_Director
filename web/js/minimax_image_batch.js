@@ -430,16 +430,25 @@ function formatPreviewFps(value) {
 }
 
 function stopPlayer(el) {
-    const st = _players.get(el);
-    if (!st) return;
-    st.playing = false;
-    if (st.timer) {
-        clearInterval(st.timer);
-        st.timer = null;
+    if (!el) return;
+    // _players 以内层 .bd-batch-vpreview 为键；调用方常传外层预览容器，
+    // 直接 get 不到时向下查出播放器 wrap 逐个停止，否则定时器会随 DOM 拔除泄漏。
+    const wraps = _players.has(el)
+        ? [el]
+        : Array.from(el.querySelectorAll?.(".bd-batch-vpreview") || []);
+    for (const wrap of wraps) {
+        const st = _players.get(wrap);
+        if (!st) continue;
+        st.playing = false;
+        st.images = null;
+        if (st.timer) {
+            clearInterval(st.timer);
+            st.timer = null;
+        }
     }
 }
 
-function stopAllPlayers(root) {
+export function stopAllPlayers(root) {
     root?.querySelectorAll(".bd-batch-vpreview")?.forEach((wrap) => stopPlayer(wrap));
     pauseActiveR2vMedia(null);
     root?.querySelectorAll("video.bd-r2v-media, audio.bd-r2v-media")?.forEach((m) => {
@@ -2256,6 +2265,15 @@ function mountVideoPreview(el, seg, running, fps, editor) {
         playBtn.textContent = t("batch.pause");
         const interval = Math.max(20, 1000 / Math.max(1, fps));
         state.timer = setInterval(() => {
+            // 自我了断：canvas 一旦脱离文档（卡片重绘/节点删除等任何路径），
+            // 下一 tick 自动停表并释放全部解码帧，杜绝定时器泄漏。
+            if (!canvas.isConnected) {
+                clearInterval(state.timer);
+                state.timer = null;
+                state.playing = false;
+                state.images = null;
+                return;
+            }
             if (!state.images?.length) return;
             state.idx = (state.idx + 1) % state.images.length;
             drawFrame(canvas, state.images[state.idx]);
