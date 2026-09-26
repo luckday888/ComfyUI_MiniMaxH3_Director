@@ -33,8 +33,8 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
 
 SOURCE_VIDEO_FP_KEY = "source_video"
 
-# 运行 seed 历史记录文件名（追加写 JSONL）。不属于段缓存，
-# prune / clear 均永久保留，详见 :func:`record_run_seed`。
+# 历史遗留的运行 seed 记录文件名（已停止写入）。不属于段缓存，
+# prune / clear 仍保留存量文件不删。
 SEED_LOG_NAME = "seeds.log"
 
 # ── 稳定段身份 -> 磁盘存储前缀 ─────────────────────────────────────────────
@@ -235,34 +235,6 @@ def _cache_root(node_id: str) -> Path | None:
     except OSError as exc:
         log.warning("Segment cache dir unavailable (%s); cache disabled for this run.", exc)
         return None
-
-
-def record_run_seed(node_id: str | None, seed: int, *, detail: dict[str, Any] | None = None) -> None:
-    """把本次运行的 seed 追加写入 ``minimax_seg_cache/<node_id>/seeds.log``。
-
-    每次开始运行（无论最终成功或失败）都记录一行 JSONL：
-    ``{"time": ..., "seed": ..., ...}``。该文件不属于段缓存，
-    ``prune_segment_cache`` / ``clear_segment_cache`` 均不得删除，永久保留。
-    Never raises.
-    """
-    if not node_id:
-        return
-    root = _cache_root(node_id)
-    if root is None:
-        return
-    try:
-        from datetime import datetime
-
-        entry: dict[str, Any] = {
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "seed": int(seed),
-        }
-        if isinstance(detail, dict):
-            entry.update(detail)
-        with (root / SEED_LOG_NAME).open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
-    except Exception as exc:
-        log.debug("Run seed log write skipped (%s).", exc)
 
 
 def _ref_audio_file_stamp(audio: Any, fallback_index: int) -> str:
@@ -1376,7 +1348,7 @@ def prune_segment_cache(node_id: str | None, valid_segments) -> None:
             if not path.is_file():
                 continue
             if path.name == SEED_LOG_NAME:
-                # 运行 seed 历史永久保留，不参与段缓存清理。
+                # 历史遗留的 seed 记录（已停止写入），不参与段缓存清理。
                 continue
             stem = _split_cache_stem(path.name)
             if stem is None:
@@ -2026,7 +1998,7 @@ def clear_segment_cache(node_id: str | None, kind: str = "final") -> int:
         except OSError:
             continue
         if path.name == SEED_LOG_NAME:
-            # 运行 seed 历史永久保留，不随任何缓存清理删除。
+            # 历史遗留的 seed 记录（已停止写入），不随任何缓存清理删除。
             continue
         is_pre = ".pre." in path.name
         if kind == "first_pass" and not is_pre:
