@@ -56,6 +56,14 @@ import logging
 
 _log = logging.getLogger("ComfyUI-MiniMaxH3-Director")
 
+# 安装死槽守卫：在 ComfyUI cleanup_models_gc 扫描前先驱逐死槽，抑制 memory leak 警告刷屏
+try:
+    from .director.vram_cleanup import install_dead_slot_guard
+
+    install_dead_slot_guard()
+except Exception as _guard_exc:
+    _log.warning("MiniMax H3 Director dead slot guard failed to install: %s", _guard_exc)
+
 try:
     from .director.http_routes import register_routes as _register_director_routes
 

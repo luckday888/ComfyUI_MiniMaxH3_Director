@@ -7,14 +7,17 @@ import logging
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.vram")
 
+# 守卫是否已安装，避免重复包装 mm.cleanup_models_gc
+_guard_installed = False
+
 
 def _evict_dead_loaded_models() -> int:
     """Pop Comfy LoadedModel slots that ``free_memory`` will skip forever.
 
     ``is_dead()`` means the ModelPatcher weakref is gone while the shared
-    MiniMaxH3 module is still alive (graph MODEL / Sage cycle). Those slots
-    log ``Potential memory leak detected with model MiniMaxH3`` and then sit
-    in ``current_loaded_models``, so later unloads cannot touch them.
+    MiniMaxH3 module is still alive (graph MODEL). Those slots would otherwise
+    log ``WARNING, memory leak with model MiniMaxH3`` and then sit in
+    ``current_loaded_models``, so later unloads cannot touch them.
     Evicting the slot does not copy weights; it restores unload bookkeeping.
     """
     try:
@@ -44,6 +47,39 @@ def _evict_dead_loaded_models() -> int:
     return evicted
 
 
+def install_dead_slot_guard() -> bool:
+    """在 ``mm.cleanup_models_gc`` 执行前先驱逐死槽。
+
+    ComfyUI 核心在 ``free_memory`` / ``load_models_gpu`` 开头都会调用
+    ``cleanup_models_gc``，频率很高。只要死槽存在，核心扫描时就会打印
+    memory leak WARNING。包装后让死槽在被检测到之前就被 pop 掉，
+    从而抑制刷屏；只动槽位簿记，不碰模型权重。
+    """
+    global _guard_installed
+    if _guard_installed:
+        return True
+    try:
+        import comfy.model_management as mm
+    except Exception:
+        return False
+
+    original = getattr(mm, "cleanup_models_gc", None)
+    if original is None or getattr(original, "_director_dead_slot_guard", False):
+        _guard_installed = True
+        return True
+
+    def guarded_cleanup_models_gc():
+        # 先回收 + 驱逐死槽，使原函数扫描时 current_loaded_models 中不存在死槽
+        _evict_dead_loaded_models()
+        return original()
+
+    guarded_cleanup_models_gc._director_dead_slot_guard = True
+    mm.cleanup_models_gc = guarded_cleanup_models_gc
+    _guard_installed = True
+    log.info("MiniMax H3 Director: dead LoadedModel guard installed")
+    return True
+
+
 def cleanup_segment_vram(*, enabled: bool = True, unload_models: bool = True) -> None:
     """Release segment GPU memory: gc, optional unload of ComfyUI models, empty CUDA cache."""
     if not enabled:
@@ -52,7 +88,8 @@ def cleanup_segment_vram(*, enabled: bool = True, unload_models: bool = True) ->
     try:
         import comfy.model_management as mm
 
-        mm.cleanup_models_gc()
+        # 关键顺序：先驱逐死槽，再调用任何会触发 cleanup_models_gc 的流程，
+        # 否则死槽在被清理前就已先打印 WARNING。
         _evict_dead_loaded_models()
         if unload_models:
             mm.unload_all_models()
