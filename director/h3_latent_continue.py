@@ -367,6 +367,28 @@ def _prefix_steps_from_latent(latent: dict) -> int:
         return 0
 
 
+def has_continue_pin(latent: Any) -> bool:
+    """latent 是否真的带了「引导+重绘」的钉住前缀。
+
+    两个条件缺一不可：
+
+    1. ``PREFIX_STEPS_KEY`` > 0 —— 只有 ``apply_latent_continue`` 会写它；
+    2. ``noise_mask`` 存在 —— ComfyUI 原生 inpaint 靠它在模型输入侧把前缀还原成
+       钉住的干净内容，缺了它 ``latent_image`` 只是形状与噪声的来源。
+
+    「引导」(guide) 两种都不满足：它只把上一段尾部当 ``minimax_keyframes`` 条件注入，
+    从不写 latent 钉子，也从不装 remask（见 ``install_continue_prefix_remask`` 的约定
+    "Guide never calls this"）。所以下游（SelfLift 两阶段采样）必须用本函数判断，绝不能
+    拿 UI 上的 overlap 帧数反推前缀 token 数：那样会让 guide 段误进 inpaint 续跑分支，
+    抬升轨迹被整段丢弃、前缀退化成单位噪声，裁掉 overlap 之后新段开头糊/虚。
+    """
+    if not isinstance(latent, dict):
+        return False
+    if latent.get("noise_mask") is None:
+        return False
+    return _prefix_steps_from_latent(latent) > 0
+
+
 def _seam_min_from_latent(latent: dict) -> float:
     raw = None
     if isinstance(latent, dict):

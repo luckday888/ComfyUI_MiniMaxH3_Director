@@ -8,13 +8,12 @@ from typing import Any, Callable
 import torch
 
 from ..core_sampling import ShiftedModelCache, sample_single_stage
-from ..h3_latent_continue import PREFIX_STEPS_KEY
+from ..h3_latent_continue import PREFIX_STEPS_KEY, has_continue_pin
 from ..h3_motion_context import _repack_av_streams, av_pixel_size
 from .carry import (
     copy_low_tail,
     lock_prefix_keep_mask,
     match_lift_prefix_dc,
-    prefix_steps_from_pin_frames,
     stamp_continue_keys,
 )
 from .cond import interpolate_video_5d, resize_av_video, resize_positive_spatial
@@ -268,18 +267,34 @@ def sample_selflift_stage(
     src_lat_h, src_lat_w = pixel_to_latent_hw(high_w, high_h)
     dst_lat_h, dst_lat_w = pixel_to_latent_hw(low_w, low_h)
 
+    # 「钉住段」只由 latent 自身的事实决定：PREFIX_STEPS_KEY 与 noise_mask 都在，
+    # 才算引导+重绘真的往头部写了钉子。历史实现还会拿 pin_frames（=UI 上的 overlap
+    # 帧数）反推前缀 token 数，于是「引导」段也被当成钉住段；但 guide 从不写 latent
+    # 钉子，keep-mask 是空的，后面的 inpaint 续跑分支拿不到 noise_mask：抬升轨迹
+    # resume_samples 被整段丢弃、前缀只剩单位噪声，裁掉 overlap 之后新段开头糊/虚。
+    # pin_frames 现在只用于低清 tail 承接。
     prefix_steps = 0
-    if isinstance(latent, dict):
+    if has_continue_pin(latent):
         try:
-            prefix_steps = int(latent.get(PREFIX_STEPS_KEY) or 0)
+            prefix_steps = max(0, int(latent.get(PREFIX_STEPS_KEY) or 0))
         except (TypeError, ValueError):
             prefix_steps = 0
-    if prefix_steps < 1 and int(pin_frames or 0) > 0:
-        prefix_steps = prefix_steps_from_pin_frames(pin_frames)
+    if int(pin_frames or 0) > 0 and prefix_steps < 1:
+        log.info(
+            "SelfLift: 本段无 latent 钉住（引导模式，只有关键帧条件）"
+            "→ 走普通两阶段续跑，抬升轨迹完整保留。"
+        )
 
     low_latent = resize_av_video(latent, dst_lat_h, dst_lat_w, upsample)
     low_latent = stamp_continue_keys(low_latent, latent)
-    if pack.get("native_low_carry", True) and prev_low_carry is not None and int(pin_frames or 0) > 0:
+    # 原生低清 tail 只在真有 keep-mask 钉住时才有意义：没有钉住的话这份内容会被
+    # 低清阶段整段去噪掉，写进去纯属白费，还会把一段非噪声初值塞进起始 latent。
+    if (
+        pack.get("native_low_carry", True)
+        and prev_low_carry is not None
+        and prefix_steps > 0
+        and int(pin_frames or 0) > 0
+    ):
         low_latent = copy_low_tail(
             low_latent, prev_low_carry, int(pin_frames), end_frame=prev_end_frame
         )
@@ -508,7 +523,17 @@ def sample_selflift_stage(
 
     high_noise = None
     high_zero_noise = True
-    if prefix_steps > 0:
+    # 兜底：inpaint 续跑分支不会把 resume_samples 写进 high_latent（续跑状态全靠
+    # high_noise 夹带 + 原生 inpaint 还原），一旦 keep-mask 缺失就等于把整段抬升
+    # 轨迹丢掉、前缀只剩单位噪声。宁可退回普通两阶段，也不能静默产出糊头。
+    use_inpaint_resume = prefix_steps > 0 and has_continue_pin(latent)
+    if prefix_steps > 0 and not use_inpaint_resume:
+        log.warning(
+            "SelfLift: prefix_steps=%d 但 latent 没有 keep-mask，"
+            "跳过 inpaint 续跑并退回普通两阶段，避免丢弃抬升轨迹。",
+            prefix_steps,
+        )
+    if use_inpaint_resume:
         # Timeline-style HQ inpaint resume: latent_image stays the continue
         # pin (empty generate region). Encode the lifted Euler state into noise
         # so locked tokens remain the true high-res predecessor at the model
