@@ -157,7 +157,7 @@ class MiniMaxH3DirectorRefine:
                         "default": DEFAULT_UPSCALE_MEGAPIXELS,
                         "min": 0.0,
                         "max": 16.0,
-                        "step": 0.1,
+                        "step": 0.01,
                         "tooltip": (
                             "放大目标百万像素。比例始终与导演台一采画布相同。"
                             "例如一采 864×480（16:9），1.8 MP → 1824×1024。"
