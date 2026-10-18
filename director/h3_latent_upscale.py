@@ -78,8 +78,7 @@ def list_h3_latent_upscale_models() -> list[str]:
         except Exception:
             pass
     out = sorted({n for n in names if n and not n.startswith("(")})
-    preferred = [n for n in out if "3d" in n.lower()]
-    return preferred or out or [MISSING_MODEL_LABEL]
+    return out or [MISSING_MODEL_LABEL]
 
 
 def _norm_tensors(device, dtype):
