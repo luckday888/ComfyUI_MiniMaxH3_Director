@@ -1126,7 +1126,10 @@ const STYLES = `
 .bd-btn-del-split:hover{background:#4a1515;border-color:#f88;color:#fcc}
 .bd-btn-sm{padding:3px 8px;font-size:10px}
 .bd-btn-run-select.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
-.bd-output .bd-btn-live-preview{margin-left:auto;background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
+.bd-output .bd-btn-live-preview{margin-left:6px;background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
+.bd-output .bd-btn-clear-cache{margin-left:auto;background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
+.bd-output .bd-btn-clear-cache:hover{background:#2a2a2a;border-color:#555;color:#ddd}
+.bd-output .bd-btn-clear-cache:disabled{opacity:.4;cursor:not-allowed}
 .bd-output .bd-btn-live-preview:hover{background:#2a2a2a;border-color:#555;color:#ddd}
 .bd-output .bd-btn-live-preview.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
 .bd-live-sample{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;padding:10px 12px;background:linear-gradient(165deg,#1a1a1a 0%,#121212 100%);border:1px solid #333;border-radius:10px;flex-shrink:0}
@@ -3051,6 +3054,7 @@ class MiniMaxH3DirectorEditor {
                     <span class="bd-meta" data-r="exposure-anchor-strength-val">40%</span>
                 </span>
             </span>
+            <button type="button" class="bd-btn bd-btn-clear-cache" data-a="clear-segment-cache" data-i18n="toolbar.clearSegmentCache" data-i18n-title="tooltip.clearSegmentCache">清理缓存</button>
             <button type="button" class="bd-btn bd-btn-live-preview" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>
             <button type="button" class="bd-btn bd-btn-live-audio" data-a="live-audio-preview" data-i18n="toolbar.liveAudioPreview" data-i18n-title="tooltip.liveAudioPreview">音频预览</button>`;
         this.mainBody.appendChild(outputBar);
@@ -3454,6 +3458,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
         bind('[data-a="live-tae-preview"]', () => this.toggleLiveTaePreview());
+        bind('[data-a="clear-segment-cache"]', () => { void this.clearStaleSegmentCache(); });
         bind('[data-a="live-audio-preview"]', () => this.toggleLiveAudioPreview());
         bind('[data-a="frame-prev"]', () => this.stepFrame(-1));
         bind('[data-a="frame-next"]', () => this.stepFrame(1));
@@ -11888,6 +11893,59 @@ class MiniMaxH3DirectorEditor {
         btn.title = on ? t("tooltip.liveTaePreviewOn") : t("tooltip.liveTaePreviewOff");
         btn.setAttribute("data-i18n", "toolbar.liveTaePreview");
         btn.removeAttribute("data-i18n-title");
+    }
+
+    /** 手动清理分段缓存：只删时间轴上已不存在的段所留下的缓存文件。
+     *  后端按当前时间轴的段身份判定缓存属主（与执行期自动清理同一套规则），
+     *  仍在时间轴上的段的缓存一律保留。 */
+    async clearStaleSegmentCache() {
+        const nodeId = this.node?.id;
+        if (nodeId == null) return;
+        const confirmed = await this.showBdDialog({
+            title: t("toolbar.clearSegmentCache"),
+            message: t("toolbar.clearSegmentCacheConfirm"),
+        });
+        if (!confirmed) return;
+        // 判定属主要用最新的时间轴（含外接组 witness）。
+        this._writeTimelineWidget?.();
+        const timelineData = injectExternalGroupsWitness(
+            this.node,
+            String(this.widget("timeline_data")?.value || ""),
+        );
+        const btn = this.root?.querySelector('[data-a="clear-segment-cache"]');
+        if (btn) btn.disabled = true;
+        try {
+            const response = await api.fetchApi("/minimax/director/prune_segment_cache", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    node_id: String(nodeId),
+                    timeline_data: timelineData,
+                    task_type: String(this.widget("task_type")?.value || ""),
+                    global_prompt: String(this.widget("global_prompt")?.value || ""),
+                    total_frames: Number(this.widget("total_frames")?.value || 124),
+                    frame_rate: Number(this.widget("frame_rate")?.value || 24),
+                    width: Number(this.widget("width")?.value || 864),
+                    height: Number(this.widget("height")?.value || 480),
+                    ref_max_size: Number(this.widget("ref_max_size")?.value || 864),
+                }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data?.error) {
+                throw new Error(data?.error || `HTTP ${response.status}`);
+            }
+            await this.showBdMessage(
+                t("toolbar.clearSegmentCache"),
+                t("toolbar.clearSegmentCacheDone", { count: Number(data.removed || 0) }),
+            );
+        } catch (error) {
+            await this.showBdMessage(
+                t("toolbar.clearSegmentCache"),
+                t("toolbar.clearSegmentCacheFailed", { message: error?.message || String(error) }),
+            );
+        } finally {
+            if (btn) btn.disabled = false;
+        }
     }
 
     isLiveAudioPreviewEnabled() {

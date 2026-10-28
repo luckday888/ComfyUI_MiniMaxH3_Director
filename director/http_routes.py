@@ -604,6 +604,96 @@ async def minimax_clear_segment_cache(request):
         return web.Response(status=500, text=str(exc))
 
 
+def _current_segment_ids(timeline_data: str, body: dict) -> list[str]:
+    """当前时间轴上仍存在的段 id 集合（手动清理缓存时判定缓存属主用）。
+
+    与执行期一致：段身份是 timeline 里的稳定 ``id``；无法从时间轴重建 plan
+    （例如 v2v 模式缺源视频、外接组只走 witness）时退回直接读 timeline 里的段
+    id，再补上外接组 witness 的段 id。
+    """
+    from .external_groups import external_witness_from_timeline_data
+    from .plan import build_director_plan
+
+    ids: list[str] = []
+    try:
+        plan = build_director_plan(
+            timeline_data,
+            global_task_type=str(body.get("task_type") or ""),
+            global_prompt=str(body.get("global_prompt") or ""),
+            total_frames=int(body.get("total_frames") or 124),
+            frame_rate=float(body.get("frame_rate") or 24.0),
+            width=int(body.get("width") or 864),
+            height=int(body.get("height") or 480),
+            ref_max_size=int(body.get("ref_max_size") or 864),
+        )
+        for seg in plan.segments:
+            sid = str(getattr(seg, "seg_id", "") or "").strip()
+            if sid:
+                ids.append(sid)
+    except Exception as exc:
+        log.warning("MiniMax H3 Director segment id rebuild failed (%s).", exc)
+        try:
+            payload = json.loads(timeline_data) if timeline_data.strip() else {}
+        except Exception:
+            payload = {}
+        for seg in (payload.get("segments") or []):
+            if not isinstance(seg, dict):
+                continue
+            sid = str(seg.get("id") or seg.get("seg_id") or "").strip()
+            if sid:
+                ids.append(sid)
+
+    # 外接组：段身份由 witness 的组记录给出（与 resolve_seg_id 同源，缺 id 时
+    # 回退 p<index>）。witness 缺失时该模式没有可判定的段身份。
+    witness = external_witness_from_timeline_data(timeline_data)
+    if witness:
+        for index, record in enumerate(witness.get("groups") or []):
+            sid = str((record or {}).get("id") or "").strip()
+            ids.append(sid or f"p{index:04d}")
+
+    out: list[str] = []
+    for sid in ids:
+        sid = str(sid or "").strip()
+        if sid and sid not in out:
+            out.append(sid)
+    return out
+
+
+async def minimax_prune_segment_cache(request):
+    """手动清理：删除时间轴上已不存在的段所拥有的分段缓存文件。
+
+    只删失效段（与执行期自动清理同一套判定），当前仍存在的段的缓存保留。
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    timeline_data = str(timeline_data)
+
+    try:
+        from .segment_cache import prune_segment_cache
+
+        valid_ids = _current_segment_ids(timeline_data, body)
+        if not valid_ids:
+            # 判定不出当前段集合时不删任何东西（避免误清有效缓存）。
+            return web.json_response(
+                {"removed": 0, "error": "No current segments to keep."}, status=400
+            )
+        removed = prune_segment_cache(node_id, valid_ids)
+        return web.json_response({"removed": removed, "kept": len(valid_ids)})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director prune segment cache failed: %s", exc)
+        return web.json_response({"removed": 0, "error": str(exc)}, status=500)
+
+
 def _coerce_preview_flag(value):
     """HTTP body 预览开关值 → bool；None/空串返回 None（表示该项不改）"""
     if value is None:
@@ -695,6 +785,12 @@ def register_routes() -> bool:
         "POST",
         "/minimax/director/clear_segment_cache",
         minimax_clear_segment_cache,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/prune_segment_cache",
+        minimax_prune_segment_cache,
     )
     _register_route(
         routes,

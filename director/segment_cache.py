@@ -1202,11 +1202,11 @@ def _split_cache_stem(name: str) -> str | None:
     return None
 
 
-def prune_segment_cache(node_id: str | None, valid_segments) -> None:
+def prune_segment_cache(node_id: str | None, valid_ids) -> int:
     """删除时间轴上已不存在的段所拥有的缓存文件。
 
-    ``valid_segments`` 接收当前段对象（含 ``seg_id/index``）；也兼容旧的 int
-    下标列表。判定规则（绝不在身份不明时误删）：
+    ``valid_ids`` 接收当前仍存在的段的稳定 id 集合。判定规则（绝不在身份不明
+    时误删）：
 
     - ``segid_<id>.*``（新稳定命名）：属主 id 不在当前段集合 → 删除。
     - ``seg_XXXX.*``（旧位置命名）：读取其 meta 内 seg_id——
@@ -1215,25 +1215,17 @@ def prune_segment_cache(node_id: str | None, valid_segments) -> None:
         * 无 seg_id（升级前遗留缓存，无法判定归属）→ 保守保留。
     - 其它无法识别的文件：保留。
 
-    使用全部当前段（而非「选择运行」子集），未选中的段仍保留导出填充缓存。
-    Never raises.
+    返回被删除的文件数。Never raises.
     """
     if not node_id:
-        return
+        return 0
     try:
         root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
         if not root.is_dir():
-            return
-        valid_ids: set[str] = set()
-        valid_safe_ids: set[str] = set()
-        for item in valid_segments:
-            if hasattr(item, "seg_id"):
-                sid = str(getattr(item, "seg_id", "") or "").strip()
-                if sid:
-                    valid_ids.add(sid)
-                    valid_safe_ids.add(_sanitize_seg_id(sid))
-            # 旧的 int 下标入参无法表达稳定身份：只保留不识别，交由下方
-            # “无属主历史文件保守保留”逻辑处理。
+            return 0
+        valid = {str(sid or "").strip() for sid in (valid_ids or [])}
+        valid.discard("")
+        valid_safe_ids = {_sanitize_seg_id(sid) for sid in valid}
 
         def legacy_owner(stem: str) -> str | None:
             """读取旧位置命名 meta 里记录的属主 seg_id（无则 None）。"""
@@ -1280,8 +1272,10 @@ def prune_segment_cache(node_id: str | None, valid_segments) -> None:
             log.info(
                 "Segment cache pruned %d stale file(s) for node %s.", removed, node_id
             )
+        return removed
     except Exception as exc:
         log.debug("Segment cache prune skipped (%s).", exc)
+        return 0
 
 
 def first_pass_cache_disk_signature(node_id: str | None) -> str:
